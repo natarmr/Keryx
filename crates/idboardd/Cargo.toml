@@ -1,0 +1,29 @@
+[package]
+name = "idboardd"
+description = "The idboard daemon: verifies every message and enforces channel ACLs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "idboardd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "idboardd"
+path = "src/main.rs"
+
+[dependencies]
+idboard-core.workspace = true
+idboard-acl.workspace = true
+idboard-store.workspace = true
+idboard-ipc.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+ctrlc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

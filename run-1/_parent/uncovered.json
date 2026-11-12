@@ -1,0 +1,37 @@
+[
+  {
+    "surface": "crates/idboardd/src/main.rs#accept loop and crates/idboard-ipc/src/lib.rs#bind security descriptor",
+    "boundary": "OS-level peer restriction on the daemon pipe and the per-invocation relay pipe",
+    "subsystem": "idboard-ipc",
+    "attack_class": "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Local IPC and exported-component attack classes",
+    "starting_paths": [
+      "crates/idboard-ipc/src/lib.rs",
+      "crates/idboardd/src/main.rs",
+      "crates/idboard/src/relay.rs"
+    ],
+    "reason": "Raised independently by three hunters. No ledger unit owns it. bind and bind_nonblocking construct the listener as ListenerOptions::new().name(name).create_sync() with no security descriptor, and the module doc states outright that a pipe name is not a security boundary. Every control the dispatch and relay units verify is a signature check that any local process on the machine is free to attempt, so the security of the whole chain rests on a transport-level decision no unit reviews. Needs its own unit stating what each endpoint may accept and whether the Windows default pipe DACL plus inherited %USERPROFILE% ACLs is the intended answer or an unexamined gap."
+  },
+  {
+    "surface": "crates/idboard/src/wrapper.rs#serve_until_exit relay accept loop and serve_one",
+    "boundary": "crates/idboard/src/wrapper.rs#serve_until_exit single-threaded accept loop and the synchronous serve_one handler",
+    "subsystem": "idboard",
+    "attack_class": "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Worker, pool, and priority starvation",
+    "starting_paths": [
+      "crates/idboard/src/wrapper.rs",
+      "crates/idboard/src/relay.rs"
+    ],
+    "reason": "Raised independently by three hunters. Source fact: serve_one is called synchronously from the accept loop and completes before the next accept, before child.try_wait() at wrapper.rs:356, and before the TICK sleep. serve_one blocks in read_frame at :403, and because apply_timeouts tolerates ErrorKind::Unsupported on Windows there is no read deadline, so any local process that opens the per-invocation relay pipe and never writes a newline wedges the wrapper permanently: it stops accepting, stops polling the child, and the identity lock is held throughout. The relay token does not help because the token check runs inside relay.handle, reached only after the unbounded read. Same reusable root cause as idboard-ipc.apply_timeouts.unsupported_swallow_removes_read_deadline, on a surface no assigned unit covers. Smallest fix: a bounded first-byte wait at :403, or serve accepted streams on a bounded worker set mirroring the daemon's WORKERS/QUEUE_DEPTH."
+  },
+  {
+    "surface": "crates/idboard/src/cli.rs#cmd_subscribe poll-loop cursor bootstrap",
+    "boundary": "crates/idboard/src/cli.rs#cmd_subscribe start-cursor derivation and crates/idboardd/src/lib.rs#handle_read empty-page cursor echo",
+    "subsystem": "idboard",
+    "attack_class": "ATTACK-CLASSES.md#Business logic",
+    "starting_paths": [
+      "crates/idboard/src/cli.rs",
+      "crates/idboardd/src/lib.rs",
+      "crates/idboard-store/src/lib.rs"
+    ],
+    "reason": "A functional defect, not a security finding, and no coverage unit names cmd_subscribe. cmd_subscribe bootstraps its cursor with client.read(channel, i64::MAX, 1)?.cursor.unwrap_or(0) (cli.rs:200-203); handle_read takes since = i64::MAX, the query filters cursor > i64::MAX and returns nothing, and idboardd/src/lib.rs:214 sets cursor to unwrap_or(since), echoing i64::MAX back. The CLI then uses that value as the since for every subsequent poll, so `idboard subscribe <channel>` without --since never returns a message and polls silently forever. No coverage unit owns the reachable consumer."
+  }
+]

@@ -1,0 +1,176 @@
+{
+  "run_id": "a2aboard-run-1",
+  "repo": "a2aboard",
+  "project_name": "idboard",
+  "target": "D:\\Code\\a2aboard",
+  "source_ref": {
+    "kind": "no_version_control",
+    "detail": "Directory has no .git directory; a .gitignore exists. The reviewed source is the working tree as of 2026-09-29. No commit identity is available, so this run is attributed to a tree snapshot, not a revision. Not a git repository means no diff-based prior-run comparison is possible.",
+    "worktree_state": "not_applicable_no_vcs",
+    "reviewed_artifacts": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "README.md",
+      "AGENTS.md",
+      ".gitignore",
+      "scripts/test.ps1",
+      "crates/idboard-core/src/{lib,envelope,error,ids,keys,layout,wire}.rs",
+      "crates/idboard-acl/src/lib.rs",
+      "crates/idboard-store/src/lib.rs",
+      "crates/idboard-ipc/src/lib.rs",
+      "crates/idboardd/src/{lib,main}.rs",
+      "crates/idboard/src/{lib,main,cli,client,keystore,lock,relay,wrapper}.rs",
+      "crates/idboard/tests/e2e.rs"
+    ],
+    "excluded_from_review": [
+      "target/ (build output, not authored source)"
+    ]
+  },
+  "profile": "standard",
+  "scope_paths": [
+    "crates/idboard-core",
+    "crates/idboard-acl",
+    "crates/idboard-store",
+    "crates/idboard-ipc",
+    "crates/idboardd",
+    "crates/idboard",
+    "scripts",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "AGENTS.md",
+    ".gitignore"
+  ],
+  "budget": null,
+  "budget_note": "No user-set budget. Spend is managed against the mandatory reserve rules in SKILL.md: one post-wave coverage critic per wave, one distinct final-clean critic, and one verifier per surviving candidate.",
+  "execution_policy": "sandboxed-source-and-local-only",
+  "execution_policy_deviation": {
+    "requested_mode": "static-only, user-selected",
+    "actual_capability": "source-only",
+    "reason": "The audit host provides no OS-enforced sandbox. There is no container or VM isolation, no empty-allowlisted-environment launcher, no read-only target or toolchain mount, and no CPU, memory, process, file-size, disk, or wall-clock enforcement available to the parent. Windows Smart App Control is additionally documented in AGENTS.md:40-45 as refusing to execute some locally built unsigned test binaries.",
+    "consequence": "No target-controlled code was executed at any point in this run: no cargo build, no cargo test, no idboard/idboardd/relay process, no scripts/test.ps1. Every check recorded in the coverage ledger is method 'source'. Consequently no candidate can satisfy the confirmed-record requirement of a bounded local observed result, so the run is expected to produce zero confirmed records. This is an execution-capability consequence, not a clean result.",
+    "prohibited_commands_not_run": [
+      "cargo build --workspace",
+      "cargo build --release",
+      "cargo test --workspace",
+      "cargo test -p <any>",
+      "scripts/test.ps1",
+      "idboard keygen <name> (writes to a real user keystore)",
+      "idboardd (opens/creates a real ~/.idboard/idboard.db)",
+      "idboardd --check (opens/creates a real ~/.idboard/idboard.db)",
+      "idboard run --identity X -- <cmd> (spawns an arbitrary third-party program)",
+      "idboard post|read|subscribe|whoami (reaches a real board)",
+      "cargo update / cargo add (rewrites Cargo.lock and contacts crates.io)"
+    ],
+    "artifact_promotion": "not applicable; no sandboxed run produced scratch output, so no promotion was performed and no local-check artifact exists in this run"
+  },
+  "selected_companion_files": [
+    "PROTOCOLS-RPC-AND-MESSAGING.md",
+    "DESKTOP-MOBILE-AND-LOCAL-IPC.md",
+    "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md",
+    "AI-AND-LLM.md"
+  ],
+  "excluded_companion_files": [
+    {
+      "file": "WEB-PROTOCOL-AND-AUTH.md",
+      "reason": "Source fact: the target has no HTTP server, no HTTP client, no session, cookie, token, JWT, OAuth, OIDC, or TLS code path. Transport is local named pipes and Unix domain sockets only (crates/idboard-ipc/src/lib.rs:97-167, crates/idboard-core/src/layout.rs:111-134)."
+    },
+    {
+      "file": "CLIENT-SIDE.md",
+      "reason": "Source fact: the target ships no browser, SPA, extension, webview, service worker, DOM, or CORS code. Rendering is plain CLI stdout via render_message (crates/idboard/src/cli.rs:304-311)."
+    },
+    {
+      "file": "CLOUD-AND-DEPLOYMENT.md",
+      "reason": "Source fact: no cloud provider SDK, IAM policy, infrastructure-as-code, container, Kubernetes, service-mesh, or serverless configuration exists in the tree."
+    },
+    {
+      "file": "DATA-ISOLATION-AND-LIFECYCLE.md",
+      "reason": "Source fact: there is no multi-tenant store, object-link layer, export, backup, migration, deletion, or retention path. Storage is a single local SQLite file per daemon process (crates/idboard-store/src/lib.rs:77-137)."
+    },
+    {
+      "file": "MEMORY-SAFETY-AND-BINARY.md",
+      "reason": "Source fact: the workspace is safe Rust for the memory-safety surface. The only unsafe blocks are environment-variable mutation in test helpers (crates/idboard/src/lock.rs:145-151, crates/idboard-core/src/layout.rs:189-197), required by edition 2024. No FFI, no unsafe pointer arithmetic, no custom allocator, no binary loader, no JIT, and no plugin loader exist in authored source."
+    },
+    {
+      "file": "SUPPLY-CHAIN-AND-RELEASE.md",
+      "reason": "Source fact: the tree contains no CI workflow, no .github directory, no Dockerfile, no build.rs, no publish or release script, no code-signing configuration, and no plugin or extension system. Cargo.lock is present and every dependency resolves to a registry source. Dependency and secret hygiene for this tree is therefore covered under the ordinary ATTACK-CLASSES.md#Obvious things unit rather than as a companion domain."
+    }
+  ],
+  "companion_selection_rationale": {
+    "PROTOCOLS-RPC-AND-MESSAGING.md": "Source fact: the target is a custom newline-delimited JSON message bus with a pub/sub board, a monotonic sequence-number replay control, per-channel subscription scope, and two distinct authentication mechanisms split across op shapes (crates/idboard-core/src/wire.rs:44-123, crates/idboardd/src/lib.rs:94-236). Framing, canonicalization, envelope-vs-payload identity, and replay/order are the named trust boundaries.",
+    "DESKTOP-MOBILE-AND-LOCAL-IPC.md": "Source fact: the target is a local daemon plus a per-invocation local IPC helper reachable over Windows named pipes and Unix domain sockets, with a per-invocation bearer token, a keystore on disk, a per-identity advisory lock, and one OS-level spawn (crates/idboard-ipc/src/lib.rs:97-167, crates/idboard/src/relay.rs:56-121, crates/idboard/src/keystore.rs, crates/idboard/src/lock.rs, crates/idboard/src/wrapper.rs:306-333). IPC peer authentication, claimed-principal-versus-channel identity, and local credential custody are the named trust boundaries.",
+    "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md": "Source fact: an unauthenticated local process reaches a fixed four-worker pool and a single Mutex<Board>, and the I/O deadline is explicitly a no-op on the primary platform because named pipes have no timeout (crates/idboardd/src/main.rs:25-29, :111-142; crates/idboard-ipc/src/lib.rs:39, :170-194). Worker/pool starvation, unbounded buffering, and pre-authentication work imbalance are the named trust boundaries.",
+    "AI-AND-LLM.md": "Source fact: the board carries a signed but never-enforced provenance claim distinguishing self-authored from externally-sourced content, and it renders attacker-influenceable message bodies to an operator terminal (crates/idboard-core/src/envelope.rs:76-90, crates/idboard/src/cli.rs:304-311, crates/idboard/src/relay.rs:145-147). Provenance confusion and insecure output rendering are the named trust boundaries. Selected narrowly: only the Context/retrieval/memory and Output/disclosure sections apply, and only for the units that own those two code paths."
+  },
+  "prior_runs": {
+    "searched": "C:\\Users\\ramra\\security-audit-skill",
+    "compatible_ledgers_found": 0,
+    "detail": "One prior run exists on this host (OpenNote/run-1) for an unrelated repository. No coverage-ledger.json or findings.json exists for a2aboard/idboard. Consequently every unit in this run carries prior_status 'none', and this run establishes the first coverage baseline. No prior evidence is carried, reused, or implied, and no statement of prior coverage is made."
+  },
+  "shared_file_owners": {
+    "run-metadata.json": "parent",
+    "architecture.md": "parent",
+    "coverage-ledger.json": "parent",
+    "findings.json": "parent",
+    "REPORT.md": "parent",
+    "FINDINGS-DETAIL.md": "parent",
+    "NEEDS-VALIDATION.md": "parent",
+    "_parent/": "parent",
+    "agents/*/scratch/": "assigned agent only",
+    "agents/*/artifacts/": "parent"
+  },
+  "run_status": "incomplete",
+  "incomplete_reason": "validation_budget_exhausted_then_resource_exhaustion_before_phase_5",
+  "phase3_validation": {
+    "candidates_hunted": 8,
+    "candidates_validated": 6,
+    "validated_by": [
+      "v-availability (2 records: idboardd.serve.board_mutex_held_across_peer_blocking_io, idboard-ipc.apply_timeouts.unsupported_swallow_removes_read_deadline)",
+      "v-custody (4 records: idboard-ipc.read_frame.unbounded-envelope-strings.daemon-rejection-log, idboard-acl.Config.load.trust-root-file-read-without-custody-check, idboard-store.read-projection-drops-signed-channel, idboard-store.open-creates-state-root-without-private-mode)"
+    ],
+    "validation_outcome_counts": {
+      "confirmed": 0,
+      "needs_validation": 6,
+      "rejected": 0
+    },
+    "no_candidate_reached_confirmed": "No candidate could reach the confirmed bar because a confirmed record requires a bounded local observed result and the audit host provides no OS-enforced sandbox. This is an execution-capability consequence, not a clean result.",
+    "material_corrections_made_by_validators": [
+      "The write-side trigger on the board-mutex record was REFUTED: pre-authentication responses are small and absorbed by the OS pipe buffer, so write_all does not block for an unauthenticated peer. The trigger was demoted from sink to evidence and the validation plan now explicitly forbids probing it.",
+      "The impact scaling on the board-mutex record was corrected: the cross-identity effect begins with the FIRST connection from another identity, not one connect stopping the accept loop. The 67-connection figure is recorded as analytic, not observed, and the plan forbids testing it.",
+      "The apply_timeouts record was re-attributed: the deadline belongs to the Stream handed over by accept/try_accept/connect, not to the generic read_frame_from, and the decisive fact (whether interprocess returns Unsupported or a real 10 s deadline) is third-party behaviour absent from the repository, so it was moved from an implicit assumption into an explicit blocker.",
+      "The rejection-log record was broadened: the sink is reached on every !ok response, not only the two pre-cryptography branches.",
+      "The state-root custody record was bounded: on the project's primary platform the two directory helpers are behaviourally identical, so the divergence is a Unix-only hardening gap, and a fourth permissive call site at crates/idboard/src/lock.rs:60 was found by the reviewer.",
+      "The read-projection record was corrected twice: envelope.rs:212 is put_u16 not put_u32, and re-verification fails at keys.rs:282 structural validation rather than at verify_strict.",
+      "The config trust-root record was narrowed to the only in-scope principal, a second non-administrative local account, because the design already excludes same-user and administrator."
+    ],
+    "candidates_not_validated": [
+      {
+        "fingerprint": "idboard/cli.rs:render_message:unescaped-body-in-operator-terminal",
+        "reason": "phase3_verifier_returned_result_but_output_was_truncated_before_the_record_completed; the verifier had already re-read every cited line, confirmed the mechanism, and issued material corrections (the README agent-facing contract recommends the JSON form for read but the plain form for subscribe, and a lower-trust poster acting within its own grant is inside the design's documented boundary, so the impact is rendered-attribution integrity rather than privilege gain). NOT independently validated to completion, NOT Phase 5 verified, and therefore deliberately EXCLUDED from findings.json rather than reported on incomplete evidence."
+      },
+      {
+        "fingerprint": "idboard/keystore.rs:save_seed:ungated-check-then-act-replace",
+        "reason": "phase3_verifier_result_lost_entirely_to_output_truncation; no verifier record survives. NOT independently validated and NOT Phase 5 verified, therefore deliberately EXCLUDED from findings.json. The hunter's source trace (check-then-act in cmd_keygen with no identity lock, versus the correctly-locked run_child path, plus the ungated load_or_create before the config membership check) remains available in the ledger unit and in _parent/candidates.json for a future run."
+      }
+    ]
+  },
+  "phase5_record_verification": {
+    "status": "not_run",
+    "reason": "Run resources were exhausted after Phase 3. Zero confirmed records exist, so the absolute rule against skipping independent review of a confirmed record is not violated, but the skill's requirement to independently verify final needs_validation records was NOT satisfied. All six records in findings.json therefore carry Phase 3 independent validation only, and no Phase 5 replacement pass was performed."
+  },
+  "incomplete_detail": [
+    "Two of eight candidates were not validated: idboard/cli.rs:render_message:unescaped-body-in-operator-terminal and idboard/keystore.rs:save_seed:ungated-check-then-act-replace. Both are archived in the coverage ledger as deferred units with their unresolved reasons and are deliberately excluded from findings.json. They are NOT findings and are not presented as such.",
+    "Phase 5 independent record verification did not run. The six retained records carry Phase 3 validation only.",
+    "The post-wave coverage critic accepted six missing units. They are seeded in the ledger as deferred wave-2 work with the critic's source-backed reasons. No wave-2 hunter ran, so the final-clean coverage critic never ran either.",
+    "Zero confirmed records is a consequence of the static-only execution policy the user selected, not a clean bill of health. Every candidate that survived source review required an observation that could not be made on this host."
+  ],
+  "agents_spent": {
+    "reconnaissance": 4,
+    "wave1_hunters": 9,
+    "post_wave_coverage_critic": 1,
+    "phase3_validators": 2,
+    "phase5_record_verifiers": 0,
+    "total": 16
+  },
+  "terminal_state": "(b) incomplete: run_status recorded with an exact reason and every gap disclosed in REPORT.md"
+}

@@ -1,0 +1,36 @@
+[package]
+name = "idboard"
+description = "The idboard CLI and the identity-signing wrapper."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "idboard"
+path = "src/main.rs"
+
+[lib]
+name = "idboard"
+path = "src/lib.rs"
+
+[dependencies]
+idboard-core.workspace = true
+idboard-acl.workspace = true
+idboard-ipc.workspace = true
+idboard-store.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+ctrlc.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+idboard-ipc.workspace = true
+idboard-acl.workspace = true
+idboard-store.workspace = true

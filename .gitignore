@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+
+# Cargo.lock is the only pinning anchor in this tree and must never be ignored.
+# A bare `*.lock` would match it, which is why these patterns are anchored to a
+# repo-local state root instead of floating free.
+!Cargo.lock
+
+# A local state root, if someone points IDBOARD_HOME inside the checkout.
+# Keys, locks, pids, databases, and sockets are never shared.
+/.idboard/

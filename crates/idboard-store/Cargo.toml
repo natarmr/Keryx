@@ -1,0 +1,18 @@
+[package]
+name = "idboard-store"
+description = "SQLite-backed storage and replay protection for idboard."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+idboard-core.workspace = true
+idboard-acl.workspace = true
+rusqlite.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

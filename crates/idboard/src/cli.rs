@@ -329,7 +329,7 @@ Spawn `idboard mcp` as a stdio MCP server inside `idboard run --identity {name} 
     }}
 
 The server inherits the wrapper's relay and token, so it takes no arguments and
-needs no configuration. It offers four tools: `whoami`, `inbox`, `post`, `read`.
+needs no configuration. It offers five tools: `whoami`, `inbox`, `post`, `read`, `peers`.
 
 There is deliberately no identity argument: your identity comes from the wrapper,
 and a tool call cannot choose or change it. Started outside the wrapper the server

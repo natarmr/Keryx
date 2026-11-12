@@ -10,7 +10,7 @@ blocked and why, and how to add a harness. It is deliberately about the
 harnesses, not about idboard: the idboard side does not change per harness.
 
 Last measured: 2026-11-13, Windows, `opencode` v2.1.4, `muse` v1.4.18,
-`warm` v0.5.9, `freebuff` v0.0.149.
+`freebuff` v0.0.149.
 
 ## Two integration shapes
 
@@ -28,11 +28,12 @@ idboard instructions --harness opencode --identity eng-01   # the two commands
 ```
 
 The MCP child inherits `IDBOARD_RELAY` and `IDBOARD_TOKEN` from the wrapper.
-It offers `whoami`, `inbox`, `post`, and `read`. There is no identity argument by
-design: the sender comes from the relay's handshake, and a tool call cannot choose
-it. `inbox` is the discovery call — it answers "which channels exist, what may I do
-in each, and where does each one stand" without the model having to guess a channel
-name first.
+It offers `whoami`, `inbox`, `post`, `read`, and `peers`. There is no identity
+argument by design: the sender comes from the relay's handshake, and a tool call
+cannot choose it. `inbox` is the discovery call — it answers "which channels exist,
+what may I do in each, and where does each one stand" without the model having to
+guess a channel name first. `peers` is diagnostic only (last-seen roster, never an
+authorization input).
 
 ## Measured matrix
 
@@ -41,10 +42,9 @@ name first.
 | `muse` 1.4.18 | `muse exec --yolo "<prompt>"` | **Verified** | `scripts\harness-smoke.ps1 -Harness muse` passed (2026-11-13): a real muse agent posted a signed message through the wrapper (env inherited, `idboard` resolved from PATH, board asserted). The launcher shim is resolved to its real `muse-bin-*.exe`. |
 | `opencode` 2.1.4 | `opencode run --auto --format json --model <m> "<prompt>"` | **Blocked by local config** | Smoke attempted 2026-11-13 but the harness exited before posting: `Configuration is invalid at C:\Users\ramra\.config\opencode\opencode.jsonc` (`V2 permissions are not supported by OpenCode V1... permissions`). Not an idboard defect; fix/isolate the global config, then re-run. Earlier (2026-10-21, v2.0.29) the wrapper/relay mechanism was verified but tool-calling was blocked by an expired Console key. |
 | `opencode2` | same | duplicate | Same npm package/exe lineage as `opencode` on this machine. Not a second harness. |
-| `warm` 0.5.9 | `warm -p "<prompt>"` | **Blocked: not logged in** | `warm status --json` reported `loggedIn:false, expired:true`. Run `warm login`, then add its argv arm (below). |
 | `freebuff` 0.0.149 | none | **Not automatable** | Only `login`, `--continue`, `--cwd`; no prompt or one-shot mode. Would need a PTY driver. |
 | Antigravity | none | **Not automatable** | GUI IDE (`~/.gemini/antigravity`). No CLI harness surface. |
-| `claude`, `codex`, `gemini`, `copilot` | — | **Absent** | Config directories exist (`~/.copilot`, `~/.gemini`) but no binaries are on `PATH`, and `gh` is not installed. Nothing to drive. |
+| `claude`, `codex`, `gemini`, `copilot`, `warm` | — | **Absent** | Not installed on `PATH` on this machine (some config dirs may exist). Nothing to drive. |
 
 A harness is *testable* here only if it has a non-interactive prompt mode **and**
 can run a shell command or speak MCP. Headless alone is not enough: a harness
@@ -113,6 +113,7 @@ These are the failures a harness run actually produces, and what each means:
 - A per-harness adapter crate or a table of prompt snippets in idboard. The
   harness-specific knowledge lives in this file and in
   `scripts/harness-smoke.ps1`; the product stays harness-agnostic.
-- A test runner that drives every harness on every commit. Two of the four
-  harnesses on this machine cannot be driven headlessly at all, so a matrix that
-  claimed coverage would be lying.
+- A test runner that drives every harness on every commit. Several harnesses on
+  this machine cannot be driven headlessly (or are absent), so a matrix that
+  claimed blanket coverage would be lying. The smoke tests are opt-in and
+  env-gated for that reason.

@@ -63,6 +63,7 @@ pub trait Backend {
     fn post(&self, channel: &str, body: &str, provenance: Provenance) -> Result<DaemonResponse>;
     fn read(&self, channel: &str, since: i64, limit: u32) -> Result<DaemonResponse>;
     fn inbox(&self, limit: u32) -> Result<DaemonResponse>;
+    fn peers(&self) -> Result<DaemonResponse>;
 }
 
 impl Backend for RelayClient {
@@ -80,6 +81,10 @@ impl Backend for RelayClient {
 
     fn inbox(&self, limit: u32) -> Result<DaemonResponse> {
         RelayClient::inbox(self, limit)
+    }
+
+    fn peers(&self) -> Result<DaemonResponse> {
+        RelayClient::peers(self)
     }
 }
 
@@ -118,6 +123,10 @@ impl Backend for LazyRelay {
 
     fn inbox(&self, limit: u32) -> Result<DaemonResponse> {
         self.client()?.inbox(limit)
+    }
+
+    fn peers(&self) -> Result<DaemonResponse> {
+        self.client()?.peers()
     }
 }
 
@@ -304,6 +313,11 @@ fn tools_list() -> serde_json::Value {
                     },
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "peers",
+                "description": "Show the registered identities and when each was last seen. Diagnostic only: presence is never an authorization input, and a peer that has never acted is still a valid peer.",
+                "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
             }
         ]
     })
@@ -371,9 +385,15 @@ fn call_tool<B: Backend>(
                 "channels": res.channels,
             })))
         }
+        "peers" => {
+            let res = backend.peers()?;
+            Ok(text_result(&serde_json::json!({
+                "peers": res.peers,
+            })))
+        }
         other => Err(Failure::Protocol(
             INVALID_PARAMS,
-            format!("unknown tool {other:?}; this server offers whoami, post, read and inbox"),
+            format!("unknown tool {other:?}; this server offers whoami, post, read, inbox and peers"),
         )),
     }
 }
@@ -486,6 +506,15 @@ mod tests {
                 messages: Vec::new(),
             }]))
         }
+
+        fn peers(&self) -> Result<DaemonResponse> {
+            self.record("peers".into())?;
+            Ok(DaemonResponse::ok().with_peers(vec![idboard_core::wire::PeerStatus {
+                identity: "eng-01".into(),
+                role: "engineer".into(),
+                last_seen_ms: 1_700_000_000_000,
+            }]))
+        }
     }
 
     fn call_tool_line(name: &str, arguments: serde_json::Value) -> String {
@@ -530,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_offers_exactly_the_three_board_operations() {
+    fn tools_list_offers_the_board_operations() {
         let stub = Stub::default();
         let line =
             handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, &stub).unwrap();
@@ -541,7 +570,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["whoami", "post", "read", "inbox"]);
+        assert_eq!(names, ["whoami", "post", "read", "inbox", "peers"]);
 
         // The schema is the other half of "a caller cannot choose its sender":
         // there is no property to put one in.
@@ -636,6 +665,25 @@ mod tests {
         assert!(text.contains("\"channel\":\"general\""), "{text}");
         assert!(!text.contains("lead"), "an identity argument reached the answer: {text}");
         assert_eq!(stub.calls.borrow().as_slice(), ["inbox 2"]);
+    }
+
+    /// Presence is diagnostic. The tool must expose the roster without taking an
+    /// identity or any other caller-chosen authority.
+    #[test]
+    fn peers_reaches_the_relay_and_ignores_an_identity_argument() {
+        let stub = Stub::default();
+        let line = handle_line(
+            &call_tool_line("peers", serde_json::json!({ "identity": "lead", "token": "x" })),
+            &stub,
+        )
+        .unwrap();
+        let v = response_value(&line);
+        assert_eq!(v["result"]["isError"], false);
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"identity\":\"eng-01\""), "{text}");
+        assert!(text.contains("\"last_seen_ms\""), "{text}");
+        assert!(!text.contains("\"identity\":\"lead\""), "an identity argument reached the answer: {text}");
+        assert_eq!(stub.calls.borrow().as_slice(), ["peers"]);
     }
 
     #[test]

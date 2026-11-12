@@ -1107,7 +1107,7 @@ fn tool_text(response: &serde_json::Value) -> &str {
 }
 
 #[test]
-fn mcp_serves_the_wrappers_identity_and_the_four_board_tools() {
+fn mcp_serves_the_wrappers_identity_and_the_board_tools() {
     let b = TestBoard::start();
     let mut mcp = McpProcess::spawn(&b, Some("eng-01"));
 
@@ -1121,7 +1121,7 @@ fn mcp_serves_the_wrappers_identity_and_the_four_board_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["whoami", "post", "read", "inbox"]);
+    assert_eq!(names, ["whoami", "post", "read", "inbox", "peers"]);
 
     let who = mcp.call(3, "whoami", serde_json::json!({}));
     assert_eq!(who["result"]["isError"], false);
@@ -1139,6 +1139,21 @@ fn mcp_serves_the_wrappers_identity_and_the_four_board_tools() {
     assert!(
         text.contains("\"channel\":\"deploy-approvals\""),
         "a readable channel the caller cannot post to must still be discoverable: {text}"
+    );
+
+    // `peers` is diagnostic only, but MCP-only agents still need the roster.
+    let peers = mcp.call(6, "peers", serde_json::json!({}));
+    assert_eq!(peers["result"]["isError"], false);
+    let text = tool_text(&peers);
+    let v: serde_json::Value = serde_json::from_str(text).expect("peers must return JSON");
+    let list = v["peers"].as_array().expect("a peers array");
+    for name in ["eng-01", "eng-02", "lead"] {
+        assert!(list.iter().any(|p| p["identity"] == name), "{name} missing from MCP peers: {list:?}");
+    }
+    let eng = list.iter().find(|p| p["identity"] == "eng-01").unwrap();
+    assert!(
+        eng["last_seen_ms"].as_i64().unwrap() > 0,
+        "the caller has acted and must be seen: {eng:?}"
     );
 
     mcp.close();

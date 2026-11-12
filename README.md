@@ -222,7 +222,7 @@ idboard instructions --harness opencode --identity eng-01  # how to wire it up
 ```
 
 If the harness speaks MCP, skip the prompt edit entirely: `idboard mcp` is a
-stdio MCP server (`whoami`, `inbox`, `post`, `read`) that inherits the wrapper's relay
+stdio MCP server (`whoami`, `inbox`, `post`, `read`, `peers`) that inherits the wrapper's relay
 when launched inside `idboard run`. See `docs/harnesses.md` for what has been
 verified on this machine, what cannot be driven headlessly, and why.
 
@@ -463,7 +463,7 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 256 tests (254 pass, 2 `#[ignore]`d live-harness tests). 222 are unit tests over
+The suite is 257 tests (255 pass, 2 `#[ignore]`d live-harness tests). 223 are unit tests over
 the envelope, ACL matrix, storage, framing, the MCP server, and the wrapper's
 child environment. 34 are end-to-end (32 run by default): they spawn the real
 `idboard` and `idboardd` binaries, open real sockets, and attack the board with

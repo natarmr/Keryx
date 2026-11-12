@@ -16,33 +16,79 @@
     Harness support is a property of the harness, not of idboard:
 
       opencode   `opencode run --auto --format json "<prompt>"`   works
+      muse       `muse exec --yolo "<prompt>"`                    works when configured
       warm       `warm -p "<prompt>"`                             needs `warm login`
       freebuff   no headless mode                                 not automatable
       others     anything with a one-shot prompt mode             add an argv arm
-                 in `live_harness_posts`
 
 .PARAMETER Harness
-    Which harness to drive. Only `opencode` is implemented today.
+    Which harness to drive.
 
 .PARAMETER TimeoutSeconds
     How long the harness may take before the test kills it.
 
+.PARAMETER List
+    Print supported harnesses, whether they are on PATH, and the resolved
+    executable. Does not build or run anything.
+
 .EXAMPLE
+    .\scripts\harness-smoke.ps1 -List
     .\scripts\harness-smoke.ps1
+    .\scripts\harness-smoke.ps1 -Harness muse
     .\scripts\harness-smoke.ps1 -Harness opencode -TimeoutSeconds 300
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('opencode')]
+    [ValidateSet('opencode', 'muse')]
     [string] $Harness = 'opencode',
     # Path to the harness's real executable. Resolved automatically when the
-    # harness is an npm shim, because CreateProcess cannot run a .cmd/.ps1.
+    # harness is an npm shim or a launcher script.
     [string] $HarnessBin,
-    # Model to run the harness with. Account-specific, and free models get
-    # retired; override this rather than editing the test.
-    [string] $Model = 'opencode/minimax-m3.1-flash-free',
-    [int] $TimeoutSeconds = 240
+    # Model to run the harness with. Account-specific; leave empty to let the
+    # harness choose its own default.
+    [string] $Model,
+    [int] $TimeoutSeconds = 240,
+    [switch] $List
 )
+
+function Resolve-HarnessBin([string] $Name, [string] $Override) {
+    if ($Override) { return $Override }
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    if (-not $cmd) { return $null }
+    if ($cmd.CommandType -eq 'Application' -and $cmd.Source -match '\.exe$') { return $cmd.Source }
+    $shimDir = Split-Path $cmd.Source -Parent
+    $found = Get-ChildItem -Path $shimDir -Filter "$Name*.exe" -File -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $found) {
+        $nodeModules = Join-Path $shimDir 'node_modules'
+        if (Test-Path $nodeModules) {
+            $found = Get-ChildItem -Path $nodeModules -Recurse -Depth 4 `
+                -Filter "$Name.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+    }
+    if ($found) { return $found.FullName }
+    return $cmd.Source
+}
+
+if ($List) {
+    foreach ($h in @('opencode', 'muse')) {
+        $cmd = Get-Command $h -ErrorAction SilentlyContinue
+        $onPath = [bool]$cmd
+        $path = if ($cmd) { $cmd.Source } else { '(not on PATH)' }
+        $bin = Resolve-HarnessBin $h $null
+        if (-not $bin) { $bin = '(unresolved)' }
+        $test = "${h}_posts_through_the_wrapper"
+        Write-Host ("{0,-10} test={1}" -f $h, $test)
+        Write-Host ("           path: {0}" -f $path)
+        Write-Host ("           exec: {0}" -f $bin)
+    }
+    Write-Host "warm: headless `warm -p` exists but needs login (not wired here)"
+    exit 0
+}
+
+if (-not $Model -and $Harness -eq 'opencode') {
+    $Model = 'opencode/minimax-m3.1-flash-free'
+}
 
 $ErrorActionPreference = 'Stop'
 $log = Join-Path ([System.IO.Path]::GetTempPath()) "idboard-harness-$Harness.log"
@@ -72,35 +118,27 @@ if ($LASTEXITCODE -ne 0) {
 if (-not $HarnessBin) {
     $cmd = Get-Command $Harness -ErrorAction SilentlyContinue
     if (-not $cmd) { throw "$Harness is not on PATH; nothing to test against" }
-
-    if ($cmd.CommandType -eq 'Application') {
-        $HarnessBin = $cmd.Source
+    $HarnessBin = Resolve-HarnessBin $Harness $null
+    if (-not $HarnessBin -or $HarnessBin -notmatch '\.exe$') {
+        $src = if ($cmd) { $cmd.Source } else { $Harness }
+        throw "$Harness resolves to $src, which is not an executable CreateProcess can run. Pass -HarnessBin <path-to-exe>."
     }
-    else {
-        # An npm shim is a .cmd that names a real .exe under node_modules.
-        $shimDir = Split-Path $cmd.Source -Parent
-        $found = Get-ChildItem -Path (Join-Path $shimDir 'node_modules') -Recurse -Depth 4 `
-            -Filter "$Harness.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $found) {
-            throw "$Harness resolves to $($cmd.Source), which is a $($cmd.CommandType) shim and " +
-                  "not an executable CreateProcess can run. Pass -HarnessBin <path-to-exe>."
-        }
-        $HarnessBin = $found.FullName
-    }
+} else {
+    $HarnessBin = Resolve-HarnessBin $Harness $HarnessBin
 }
 Write-Host "harness executable: $HarnessBin"
 
+$testName = "${Harness}_posts_through_the_wrapper"
 $env:IDBOARD_LIVE_HARNESS = $Harness
 $env:IDBOARD_LIVE_HARNESS_BIN = $HarnessBin
-$env:IDBOARD_LIVE_HARNESS_MODEL = $Model
+if ($Model) { $env:IDBOARD_LIVE_HARNESS_MODEL = $Model } else { Remove-Item Env:\IDBOARD_LIVE_HARNESS_MODEL -ErrorAction SilentlyContinue }
 try {
     Write-Host "driving $Harness under idboard run (timeout ${TimeoutSeconds}s), log: $log"
     # Redirect to a file and read $LASTEXITCODE. Piping cargo's stderr through
     # PowerShell turns native stderr into error records, which makes a passing
     # run look like a failure when the harness writes JSON-lines to stdout.
     Invoke-Native {
-        & cargo test -p idboard --test e2e -- --ignored --exact --nocapture `
-            opencode_posts_through_the_wrapper *> $log
+        & cargo test -p idboard --test e2e -- --ignored --exact --nocapture $testName *> $log
     }
     $code = $LASTEXITCODE
 

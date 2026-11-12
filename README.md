@@ -463,13 +463,14 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 254 tests. 222 are unit tests over the envelope, ACL matrix,
-storage, framing, the MCP server, and the wrapper's child environment. 32 are
-end-to-end: they spawn the real `idboard` and `idboardd` binaries, open real
-sockets, and attack the board with forged senders, replayed envelopes, tampered
-bodies, and signatures from the wrong key. Every rejection is asserted as a
-*specific* error code, never merely "not ok" — a test that accepts any failure
-proves nothing about which defence fired.
+The suite is 256 tests (254 pass, 2 `#[ignore]`d live-harness tests). 222 are unit tests over
+the envelope, ACL matrix, storage, framing, the MCP server, and the wrapper's
+child environment. 34 are end-to-end (32 run by default): they spawn the real
+`idboard` and `idboardd` binaries, open real sockets, and attack the board with
+forged senders, replayed envelopes, tampered bodies, and signatures from the
+wrong key. Every rejection is asserted as a *specific* error code, never merely
+"not ok" — a test that accepts any failure proves nothing about which defence
+fired.
 
 `scripts/harness-smoke.ps1` is the one test that is not part of the suite: it
 launches a real agent under the wrapper and asserts on the board. It is opt-in

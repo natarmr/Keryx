@@ -1296,10 +1296,24 @@ fn live_harness_posts(harness: &str, argv: &[String], prompt: &str, nonce: &str)
     );
 }
 
-/// The one harness this machine can drive headlessly today.
-///
-/// Ignored on purpose: it needs a model, network access, and possibly money.
-/// `IDBOARD_LIVE_HARNESS=opencode` plus `--ignored` is the opt-in.
+fn live_nonce() -> String {
+    format!("live-{}-{}", std::process::id(), idboard_core::now_ms())
+}
+
+fn live_prompt(nonce: &str) -> String {
+    format!(
+        "You are checking a local message bus. Do exactly this and nothing else:\n\
+         1. Run the shell command `idboard whoami` and note the identity it prints.\n\
+         2. Run `idboard post general \"{nonce} from <identity>\"`, replacing <identity> with the \
+         identity from step 1 and keeping the nonce exactly as written.\n\
+         3. Reply with one line: WHOAMI <identity>\n\
+         Do not read or modify any files. Do not post more than once."
+    )
+}
+
+/// A headless harness must be able to run the wrapper's child and inherit the
+/// relay from its environment. Ignored on purpose: it needs a model, network
+/// access, and possibly money. Drive it via `scripts\harness-smoke.ps1`.
 #[test]
 #[ignore = "spends model tokens; run scripts\\harness-smoke.ps1 -Harness opencode"]
 fn opencode_posts_through_the_wrapper() {
@@ -1309,26 +1323,16 @@ fn opencode_posts_through_the_wrapper() {
     }
 
     // `opencode` on PATH is an npm shim (.cmd/.ps1), and `CreateProcess` cannot
-    // run a shim. The script resolves the real executable and passes it here;
-    // falling back to the bare name keeps the test honest about what failed.
+    // run a shim. The script resolves the real executable and passes it here.
     let bin = std::env::var("IDBOARD_LIVE_HARNESS_BIN").unwrap_or_else(|_| "opencode".to_string());
-
-    let nonce = format!("live-{}-{}", std::process::id(), idboard_core::now_ms());
-    let prompt = format!(
-        "You are checking a local message bus. Do exactly this and nothing else:\n\
-         1. Run the shell command `idboard whoami` and note the identity it prints.\n\
-         2. Run `idboard post general \"{nonce} from <identity>\"`, replacing <identity> with the \
-         identity from step 1 and keeping the nonce exactly as written.\n\
-         3. Reply with one line: WHOAMI <identity>\n\
-         Do not read or modify any files. Do not post more than once."
-    );
+    let nonce = live_nonce();
+    let prompt = live_prompt(&nonce);
 
     // The model is an account property, not a property of idboard, and a free
-    // model can be retired mid-week. `scripts\harness-smoke.ps1 -Model` sets it;
-    // with no model the harness picks its own default, which may fail for
-    // reasons that have nothing to do with this integration.
-    let mut argv =
-        vec![bin, "run".into(), "--auto".into(), "--format".into(), "json".into()];
+    // model can be retired mid-week. With no model the harness picks its own
+    // default, which may fail for reasons that have nothing to do with this
+    // integration.
+    let mut argv = vec![bin, "run".into(), "--auto".into(), "--format".into(), "json".into()];
     if let Ok(model) = std::env::var("IDBOARD_LIVE_HARNESS_MODEL") {
         if !model.is_empty() {
             argv.push("--model".into());
@@ -1337,6 +1341,32 @@ fn opencode_posts_through_the_wrapper() {
     }
 
     live_harness_posts("opencode", &argv, &prompt, &nonce);
+}
+
+/// `muse exec` is the headless path. `--yolo` disables approval and the sandbox
+/// so the agent can run `idboard` inside the wrapper non-interactively; the
+/// prompt still constrains what it is asked to do.
+#[test]
+#[ignore = "spends model tokens; run scripts\\harness-smoke.ps1 -Harness muse"]
+fn muse_posts_through_the_wrapper() {
+    if std::env::var("IDBOARD_LIVE_HARNESS").ok().as_deref() != Some("muse") {
+        eprintln!("skipping: set IDBOARD_LIVE_HARNESS=muse to run this");
+        return;
+    }
+
+    let bin = std::env::var("IDBOARD_LIVE_HARNESS_BIN").unwrap_or_else(|_| "muse".to_string());
+    let nonce = live_nonce();
+    let prompt = live_prompt(&nonce);
+
+    let mut argv = vec![bin, "exec".into(), "--yolo".into()];
+    if let Ok(model) = std::env::var("IDBOARD_LIVE_HARNESS_MODEL") {
+        if !model.is_empty() {
+            argv.push("--model".into());
+            argv.push(model);
+        }
+    }
+
+    live_harness_posts("muse", &argv, &prompt, &nonce);
 }
 
 // ---------------------------------------------------------------------------

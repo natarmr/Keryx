@@ -9,8 +9,8 @@ This file records what has actually been measured on this machine, what is
 blocked and why, and how to add a harness. It is deliberately about the
 harnesses, not about idboard: the idboard side does not change per harness.
 
-Last measured: 2026-10-21, Windows, `opencode` v2.0.29, `warm` v0.5.9,
-`freebuff` v0.0.149.
+Last measured: 2026-11-13, Windows, `opencode` v2.1.4, `muse` v1.4.18,
+`warm` v0.5.9, `freebuff` v0.0.149.
 
 ## Two integration shapes
 
@@ -38,8 +38,9 @@ name first.
 
 | Harness | Headless invocation | Status | Notes |
 |---|---|---|---|
-| `opencode` 2.0.29 | `opencode run --auto --format json --model <m> "<prompt>"` | **Mechanism verified**; full post test blocked | Its `shell` tool inherits the parent environment: an `IDBOARD_PROBE` set by the parent was visible inside the tool. Tool-calling sessions currently fail with `This API key has expired … Create a new API key in OpenCode Console` (see below). |
-| `opencode2` | same | duplicate | Same npm package, same v2.0.29 shim. Not a second harness. |
+| `muse` 1.4.18 | `muse exec --yolo "<prompt>"` | **Verified** | `scripts\harness-smoke.ps1 -Harness muse` passed (2026-11-13): a real muse agent posted a signed message through the wrapper (env inherited, `idboard` resolved from PATH, board asserted). The launcher shim is resolved to its real `muse-bin-*.exe`. |
+| `opencode` 2.1.4 | `opencode run --auto --format json --model <m> "<prompt>"` | **Blocked by local config** | Smoke attempted 2026-11-13 but the harness exited before posting: `Configuration is invalid at C:\Users\ramra\.config\opencode\opencode.jsonc` (`V2 permissions are not supported by OpenCode V1... permissions`). Not an idboard defect; fix/isolate the global config, then re-run. Earlier (2026-10-21, v2.0.29) the wrapper/relay mechanism was verified but tool-calling was blocked by an expired Console key. |
+| `opencode2` | same | duplicate | Same npm package/exe lineage as `opencode` on this machine. Not a second harness. |
 | `warm` 0.5.9 | `warm -p "<prompt>"` | **Blocked: not logged in** | `warm status --json` reported `loggedIn:false, expired:true`. Run `warm login`, then add its argv arm (below). |
 | `freebuff` 0.0.149 | none | **Not automatable** | Only `login`, `--continue`, `--cwd`; no prompt or one-shot mode. Would need a PTY driver. |
 | Antigravity | none | **Not automatable** | GUI IDE (`~/.gemini/antigravity`). No CLI harness surface. |
@@ -53,7 +54,9 @@ the board, never on the transcript.
 ## The smoke test
 
 ```sh
+.\scripts\harness-smoke.ps1 -List                    # supported harnesses + resolved executables
 .\scripts\harness-smoke.ps1                          # opencode, default free model
+.\scripts\harness-smoke.ps1 -Harness muse
 .\scripts\harness-smoke.ps1 -Model opencode/glm-5.3-flash-free
 .\scripts\harness-smoke.ps1 -HarnessBin C:\path\to\opencode.exe
 ```
@@ -71,11 +74,12 @@ nonce. The test then reads the board **as `eng-02`** and requires:
 The board is the authority because a model can say anything; a signed message is
 the only claim the test accepts.
 
-It lives in `crates/idboard/tests/e2e.rs` as
-`opencode_posts_through_the_wrapper`, marked `#[ignore]` and gated on
-`IDBOARD_LIVE_HARNESS=opencode`. It is out of `cargo test --workspace` on
-purpose: it needs network, a model, and possibly money, and the default suite
-must stay offline and deterministic.
+The live tests live in `crates/idboard/tests/e2e.rs` as
+`opencode_posts_through_the_wrapper` and `muse_posts_through_the_wrapper`, both
+`#[ignore]` and gated on `IDBOARD_LIVE_HARNESS=<harness>`. They are out of
+`cargo test --workspace` on purpose: each needs network, a model, and possibly
+money, and the default suite must stay offline and deterministic. `-List` shows
+the per-harness test name and the executable that would be driven.
 
 ## Adding a harness
 
@@ -96,9 +100,11 @@ These are the failures a harness run actually produces, and what each means:
 |---|---|---|
 | `idboard: cannot start "opencode": program not found` | `opencode` on `PATH` is an npm `.cmd` shim, and `CreateProcess` cannot run it | The script resolves the real `.exe` under `node_modules`; or pass `-HarnessBin` |
 | `Cannot find module … opencode.exe` after `-HarnessBin` | pointed at the `.cmd` shim rather than the executable it launches | Read the first line of the `.cmd`; use the path it names |
+| `Configuration is invalid at …opencode.jsonc` / `V2 permissions are not supported by OpenCode V1` | global OpenCode config incompatible with the installed binary | Fix or isolate `~/.config/opencode/opencode.jsonc` (env-side), then re-run; not an idboard defect |
 | `Unexpected server error … ref err_…` | the harness's own inference path failed | Check `~/.local/share/opencode/log/opencode.log`; it names the real cause |
 | `This API key has expired … OpenCode Console` | the Console key is expired, and OpenCode uses its "small" model for title/summarisation even when `--model` names a free model | Re-authenticate OpenCode Console; signing in again does not renew a key that expired |
 | `Model … has been deprecated` | free model retired | Pass `-Model` with a current id from `opencode models` |
+| `muse … failed to fetch model catalog` / `no_allowance` | muse cannot reach or is not entitled to its provider/model | Fix muse auth/provider access; the smoke still requires a successful model run that can execute shell commands |
 | `idboard: identity "eng-01" signed 0 message(s)` on stderr | the wrapper's exit summary | Normal. It is the evidence that the wrapper was alive and the agent never posted |
 | test panics with `without a signed post carrying …` and a full transcript | the agent did not follow the prompt, or its tool call failed | Read the transcript in the panic message before changing anything |
 

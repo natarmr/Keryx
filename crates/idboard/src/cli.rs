@@ -1990,7 +1990,7 @@ fn cmd_web(json: bool, bind: &str, once: bool) -> Result<i32> {
         };
         let head_body = if method == "HEAD" { Vec::new() } else { body };
         let response = format!(
-            "HTTP/1.0 {status} {status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src self; style-src 'unsafe-inline'; script-src 'unsafe-inline'\r\n\r\n",
+            "HTTP/1.0 {status} {status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'\r\n\r\n",
             head_body.len()
         );
         let _ = socket.write_all(response.as_bytes());

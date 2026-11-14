@@ -2949,48 +2949,114 @@ const WEB_HTML: &str = r#"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Keryx console</title>
 <style>
-:root { color-scheme: dark; --bg:#090a0f; --panel:#131720; --panel2:#1b2130; --border:#283045; --text:#e6eaf7; --muted:#8d99b8; --ok:#42d392; --warn:#ffcc66; --bad:#ff6b6b; --mono: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+:root {
+  color-scheme: light;
+  --paper: #ECE9DF;
+  --panel: #F7F5ED;
+  --ink: #1A1D24;
+  --muted: #5C6270;
+  --rule: #D3CEBD;
+  --hairline: #E2DECF;
+  --ok: #1F7A4D;
+  --warn: #A16207;
+  --bad: #B3261E;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 * { box-sizing: border-box; }
-body { margin: 0; background: radial-gradient(circle at 15% -10%, #19233a 0, transparent 35%), radial-gradient(circle at 90% 120%, #241733 0, transparent 40%), var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
-header { padding: 22px 28px 14px; border-bottom: 1px solid var(--border); display:flex; align-items:baseline; justify-content:space-between; gap:24px; }
-h1 { font-size: 22px; margin: 0; letter-spacing: .04em; }
-h2 { font-size: 11px; margin: 0 0 14px; color: var(--muted); letter-spacing: .18em; text-transform: uppercase; }
-main { padding: 24px 28px 40px; max-width: 1200px; margin: 0 auto; display: grid; gap: 18px; }
-.grid { display:grid; gap:16px; }
-.two { grid-template-columns: repeat(2, minmax(0,1fr)); }
-.panel { background: linear-gradient(180deg, var(--panel), var(--panel2)); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
-.panel.ok { border-left: 3px solid var(--ok); } .panel.bad { border-left: 3px solid var(--bad); } .panel.warn { border-left: 3px solid var(--warn); }
-.statusline { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
-.badge { display:inline-flex; align-items:center; gap:8px; font: 12px var(--mono); padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); }
-.badge.ok { color: var(--ok); border-color: rgba(66,211,146,.35); } .badge.bad { color: var(--bad); border-color: rgba(255,107,107,.35); }
-.muted { color: var(--muted); } .mono { font-family: var(--mono); }
-.metrics { display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:10px; margin-top: 14px; }
-.metric { background: rgba(255,255,255,.03); border-radius: 10px; padding: 10px 12px; }
-.metric strong { display:block; font-size: 28px; line-height:1; }
-.metric span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing:.08em; }
-ul { margin: 0; padding-left: 18px; } li { margin: 6px 0; } li.fail { color: var(--bad); } li.ok { color: var(--ok); }
-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid rgba(255,255,255,.06); vertical-align: top; }
-th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing:.08em; }
-td.mono { font-family: var(--mono); }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+header {
+  padding: 24px 28px 18px;
+  border-bottom: 3px double var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+h1 { font-size: 26px; margin: 0; font-weight: 800; letter-spacing: -0.01em; }
+h1 .thin { font-weight: 400; color: var(--muted); }
+.sub { color: var(--muted); margin-top: 2px; }
+.stamp {
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  border: 3px double currentColor;
+  border-radius: 6px;
+  padding: 2px 12px;
+  transform: rotate(-2deg);
+  white-space: nowrap;
+}
+.stamp.ok { color: var(--ok); }
+.stamp.bad { color: var(--bad); }
+.stamp.idle { color: var(--muted); }
+.loopback { color: var(--muted); font-size: 12px; font-family: var(--mono); text-align: right; }
+h2 { font-size: 15px; font-weight: 700; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 2px solid var(--ink); }
+main { padding: 22px 28px 40px; max-width: 1180px; margin: 0 auto; display: grid; gap: 18px; }
+.grid { display: grid; gap: 16px; }
+.two { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
+.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 20px; }
+.panel.bad { border-color: var(--bad); border-top: 4px solid var(--bad); }
+.panel.warn { border-top: 4px solid var(--warn); }
+.panel.ok { border-top: 4px solid var(--ok); }
+.statusline { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.badge { display: inline-block; font-size: 12px; font-family: var(--mono); padding: 3px 10px; border-radius: 999px; border: 1px solid var(--rule); }
+.badge.ok { color: var(--ok); border-color: var(--ok); }
+.badge.bad { color: var(--bad); border-color: var(--bad); }
+.muted { color: var(--muted); }
+.mono { font-family: var(--mono); }
+.ledger { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ledger th { text-align: left; font-weight: 700; font-size: 12px; color: var(--muted); padding: 6px 8px 6px 0; border-bottom: 2px solid var(--ink); }
+.ledger td { padding: 7px 8px 7px 0; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+.ledger tr:last-child td { border-bottom: none; }
+.ledger td.n, .figures .n { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.figures { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-top: 12px; border-top: 2px solid var(--ink); }
+.figure { padding: 10px 12px 6px 0; }
+.figure + .figure { border-left: 1px solid var(--hairline); padding-left: 12px; }
+.figure strong { display: block; font-size: 30px; line-height: 1.05; font-weight: 800; font-variant-numeric: tabular-nums; }
+.figure span { color: var(--muted); font-size: 12px; }
+ul.checks { margin: 0; padding: 0; list-style: none; }
+ul.checks li { margin: 0; padding: 7px 0 7px 26px; border-bottom: 1px solid var(--hairline); position: relative; }
+ul.checks li:last-child { border-bottom: none; }
+ul.checks li::before { position: absolute; left: 2px; font-family: var(--mono); font-weight: 700; }
+ul.checks li.ok::before { content: '✓'; color: var(--ok); }
+ul.checks li.fail::before { content: '!'; color: var(--bad); }
+li.fail { color: var(--bad); }
+li.ok { color: inherit; }
+.problem { color: var(--bad); font-family: var(--mono); font-size: 12px; margin-top: 8px; }
+.log { margin: 0; }
+.log .entry { display: grid; grid-template-columns: 64px 110px 110px 1fr; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--hairline); font-size: 13px; }
+.log .entry:last-child { border-bottom: none; }
+.log .cursor { font-family: var(--mono); color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.log .who { font-family: var(--mono); overflow-wrap: anywhere; }
+.log .body { overflow-wrap: anywhere; }
 .empty { color: var(--muted); font-style: italic; }
-footer { padding: 18px 28px 28px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
-@media (max-width: 860px) { .two, .metrics { grid-template-columns: 1fr; } }
+footer { padding: 16px 28px 28px; color: var(--muted); font-size: 12px; border-top: 3px double var(--ink); max-width: 1180px; margin: 0 auto; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+@media (max-width: 860px) { .two { grid-template-columns: 1fr; } .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); } .log .entry { grid-template-columns: 52px 1fr; } .log .who { display: none; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
 <body>
 <header>
   <div>
-    <h1>Keryx console</h1>
-    <div class="muted">read-only board health for operators and agents</div>
+    <h1>Keryx <span class="thin">console</span></h1>
+    <div class="sub">Read-only board health for operators and agents.</div>
   </div>
-  <div class="muted mono">served on loopback · Ctrl-C to stop the console process</div>
+  <div>
+    <div class="stamp idle" id="header-stamp">loading</div>
+    <div class="loopback">served on loopback · stop with Ctrl-C</div>
+  </div>
 </header>
 <main id="root">
   <section class="panel ok" id="local-panel">
     <h2>Local checks</h2>
     <div id="local-summary" class="statusline"><span class="badge">loading…</span></div>
-    <ul id="local-checks"></ul>
+    <ul class="checks" id="local-checks"></ul>
     <div id="local-problems"></div>
   </section>
 
@@ -2999,11 +3065,11 @@ footer { padding: 18px 28px 28px; color: var(--muted); font-size: 12px; border-t
       <h2>Board</h2>
       <div class="statusline"><span id="board-status" class="badge">loading…</span><span id="board-identity" class="muted mono"></span></div>
       <div class="muted mono" id="board-age" style="margin-top:8px">last message: …</div>
-      <div class="metrics">
-        <div class="metric"><strong id="channels">…</strong><span>channels</span></div>
-        <div class="metric"><strong id="tasks-open">…</strong><span>open</span></div>
-        <div class="metric"><strong id="tasks-claimed">…</strong><span>claimed</span></div>
-        <div class="metric"><strong id="tasks-done">…</strong><span>done</span></div>
+      <div class="figures">
+        <div class="figure"><strong id="channels">…</strong><span>channels</span></div>
+        <div class="figure"><strong id="tasks-open">…</strong><span>open</span></div>
+        <div class="figure"><strong id="tasks-claimed">…</strong><span>claimed</span></div>
+        <div class="figure"><strong id="tasks-done">…</strong><span>done</span></div>
       </div>
     </div>
 
@@ -3025,20 +3091,29 @@ footer { padding: 18px 28px 28px; color: var(--muted); font-size: 12px; border-t
     <div id="channels-table"><span class="empty">loading…</span></div>
   </section>
 </main>
-<footer><span class="mono">Keryx console</span> · this page is served from the same process as the board, on loopback only. Body text and identities are displayed as plain text only.</footer>
+<footer><span class="mono">Keryx console</span> · served from the same process as the board, on loopback only. Body text and identities are shown as plain text only.</footer>
 <script>
 const text = (v) => v === null || v === undefined ? '—' : String(v);
 const esc = (v) => String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = text(v); };
 function renderCheck(name, ok, detail) {
-  return `<li class="${ok ? 'ok' : 'fail'}"><span class="mono">${esc(name)}</span> — ${esc(detail)}</li>`;
+  return `<li class="${ok ? 'ok' : 'fail'}"><span class="mono">${esc(name)}</span>: ${esc(detail)}</li>`;
 }
 function renderRow(cells) {
-  return `<tr>${cells.map(c => `<td class="${c.mono ? 'mono' : ''}">${esc(c.v)}</td>`).join('')}</tr>`;
+  return `<tr>${cells.map(c => `<td class="${c.mono ? 'n' : ''}">${esc(c.v)}</td>`).join('')}</tr>`;
+}
+function setStamp(state, label) {
+  const el = document.getElementById('header-stamp');
+  el.className = 'stamp ' + state;
+  el.textContent = label;
 }
 async function refresh() {
   const res = await fetch('./data', { cache: 'no-store' });
-  if (!res.ok) { document.getElementById('local-summary').innerHTML = '<span class="badge bad">console error</span>'; return; }
+  if (!res.ok) {
+    document.getElementById('local-summary').innerHTML = '<span class="badge bad">console error</span>';
+    setStamp('bad', 'unreachable');
+    return;
+  }
   const data = await res.json();
   const local = data.checks || [];
   const failed = local.filter(c => c.ok === false);
@@ -3047,7 +3122,7 @@ async function refresh() {
     `<span class="badge ${failed.length ? 'bad' : 'ok'}">${failed.length ? 'attention' : 'ok'}</span>` +
     `<span class="muted">${failed.length} problem(s), ${local.length} check(s)</span>`;
   document.getElementById('local-checks').innerHTML = local.map(c => renderCheck(c.name, c.ok !== false, c.detail || '')).join('');
-  document.getElementById('local-problems').innerHTML = (data.problems || []).map(p => `<div class="fail muted mono">problem: ${esc(p.check)} — ${esc(p.detail)}</div>`).join('');
+  document.getElementById('local-problems').innerHTML = (data.problems || []).map(p => `<div class="problem">problem: ${esc(p.check)}: ${esc(p.detail)}</div>`).join('');
 
   const board = data.board || {};
   const available = board.available === true;
@@ -3063,25 +3138,28 @@ async function refresh() {
   setText('tasks-done', board.tasks?.done ?? '—');
 
   const oldest = board.tasks?.oldest_unclaimed;
+  const claimed = board.tasks?.claimed ?? 0;
+  const open = board.tasks?.open ?? 0;
   document.getElementById('tasks-panel').className = `panel ${oldest ? 'warn' : ''}`;
   setText('tasks-summary', oldest
-    ? `oldest unclaimed task: ${oldest.id} — ${oldest.title} (${oldest.channel})`
+    ? `oldest unclaimed task: ${oldest.id}, ${oldest.title} (${oldest.channel})`
     : 'no unclaimed tasks');
-  const by = board.tasks?.claimed_by || {};
   setText('tasks-leases', `leases: ${board.tasks?.leases_active ?? 0} active, ${board.tasks?.leases_expired ?? 0} expired`);
   document.getElementById('tasks-by-identity').textContent =
-    Object.keys(by).length
-      ? Object.entries(by).map(([who, n]) => `${who}: ${n} claimed`).join(' · ')
+    Object.entries(by).length
+      ? Object.entries(by).map(([who, n]) => `${who}: ${n} claimed`).join(', ')
       : 'nobody holds a claim right now';
+  setStamp(!available ? 'idle' : failed.length ? 'bad' : (oldest || claimed || open) ? 'warn' : 'ok',
+    !available ? 'offline' : failed.length ? 'attention' : (oldest || claimed || open) ? 'action' : 'clear');
 
   const recent = board.recent || [];
   document.getElementById('recent').innerHTML = recent.length
-    ? `<table><thead><tr><th>cursor</th><th>channel</th><th>sender</th><th>body</th></tr></thead><tbody>${recent.map(m => renderRow([{v:m.cursor,mono:true},{v:m.channel,mono:true},{v:m.sender,mono:true},{v:m.body}])).join('')}</tbody></table>`
+    ? `<div class="log" role="table" aria-label="recent messages">${recent.map(m => `<div class="entry" role="row"><span class="cursor">${esc(m.cursor)}</span><span class="who">${esc(m.sender)}</span><span class="mono">${esc(m.channel)}</span><span class="body">${esc(m.body)}</span>`).join('')}</div>`
     : '<span class="empty">no recent messages</span>';
 
   const channels = board.channels || [];
   document.getElementById('channels-table').innerHTML = channels.length
-    ? `<table><thead><tr><th>channel</th><th>access</th><th>cursor</th><th>messages</th></tr></thead><tbody>${channels.map(c => renderRow([{v:c.channel,mono:true},{v:`read=${c.can_read} post=${c.can_post}`},{v:c.cursor,mono:true},{v:c.messages,mono:true}])).join('')}</tbody></table>`
+    ? `<table class="ledger"><thead><tr><th>channel</th><th>access</th><th>cursor</th><th>messages</th></tr></thead><tbody>${channels.map(c => renderRow([{v:c.channel,mono:true},{v:`read=${c.can_read} post=${c.can_post}`},{v:c.cursor,mono:true},{v:c.messages,mono:true}])).join('')}</tbody></table>`
     : '<span class="empty">no channels visible</span>';
 }
 refresh();

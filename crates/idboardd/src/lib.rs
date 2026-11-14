@@ -234,15 +234,17 @@ fn handle_post(
     let now = clock();
     if !budget.allow(&identity.name, now, config.limits()) {
         let limits = config.limits();
+        let retry_after = budget.seconds_until_slot(&identity.name, now, limits);
         return Err(CoreError::new(
             ErrorCode::RateLimited,
             format!(
                 "identity {:?} has used its budget of {} posts per {}s. Reads are not \
-                 charged, so polling still works; wait for the window to slide, or raise \
-                 [limits].posts_per_window in the config.",
+                 charged, so polling still works; the window slides in about {}s. Raise \
+                 [limits].posts_per_window in the config to allow more.",
                 identity.name,
                 limits.posts_per_window,
-                limits.window_ms / 1000
+                limits.window_ms / 1000,
+                retry_after
             ),
         ));
     }
@@ -287,6 +289,24 @@ impl PostBudget {
         }
         recent.push_back(now_ms);
         true
+    }
+
+    /// Estimate when a completed rate-limit refusal will permit one more post.
+    ///
+    /// This is diagnostic text for operators and agents, not a protocol field.
+    /// The caller keeps the exact `ErrorCode::RateLimited` and can parse the
+    /// number if it wants; tests must not rely on the wording.
+    fn seconds_until_slot(&self, identity: &str, now_ms: i64, limits: idboard_acl::Limits) -> u64 {
+        let window = limits.window_ms as i64;
+        let cutoff = now_ms.saturating_sub(window);
+        let oldest = self
+            .recent
+            .get(identity)
+            .and_then(|recent| recent.iter().find(|t| *t > &cutoff))
+            .copied()
+            .unwrap_or(now_ms);
+        let remaining = oldest.saturating_add(window).saturating_sub(now_ms);
+        ((remaining.max(0) + 999) / 1000).max(1) as u64
     }
 }
 

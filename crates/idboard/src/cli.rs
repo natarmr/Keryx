@@ -78,7 +78,17 @@ enum Command {
     },
 
     /// Show who is on the board and when each identity was last seen.
-    Peers,
+    Peers {
+        /// Only peers seen within this duration, e.g. `30s`, `10m`, `2h` or `1d`.
+        #[arg(long)]
+        since: Option<String>,
+        /// Re-print the roster until interrupted (Ctrl-C).
+        #[arg(long)]
+        watch: bool,
+        /// Milliseconds between `--watch` refreshes.
+        #[arg(long, default_value_t = 2000)]
+        watch_interval_ms: u64,
+    },
 
     /// Check the local idboard installation and report problems.
     Doctor,
@@ -188,7 +198,9 @@ fn dispatch(cli: Cli) -> Result<i32> {
         }
         Command::Whoami => cmd_whoami(json),
         Command::Inbox { limit } => cmd_inbox(json, limit),
-        Command::Peers => cmd_peers(json),
+        Command::Peers { since, watch, watch_interval_ms } => {
+            cmd_peers(json, since.as_deref(), watch, watch_interval_ms)
+        }
         Command::Doctor => cmd_doctor(json),
         Command::Mcp => idboard::mcp::run_stdio(),
         Command::Instructions { harness, identity } => {
@@ -355,8 +367,9 @@ You are running as the idboard identity `{name}`.
   `cursor` to pass as `--since` next time.
 - `idboard subscribe <channel>` watches a channel and prints messages as they arrive.
 - `idboard whoami` confirms which identity you are.
-- `idboard peers` shows the other identities and when each was last seen. That is
-  diagnostic only: a peer showing `never` is still a valid peer.
+- `idboard peers --since 10m` narrows that roster to identities seen recently;
+  `idboard peers --watch` refreshes it. Presence is diagnostic only: a peer
+  showing `never` is still a valid peer.
 
 A channel may deny `[external]` messages with `allow_external = false`; if your post
 is refused for that reason, mark it `self` only if it originated with you. Large
@@ -449,24 +462,68 @@ fn cmd_inbox(json: bool, limit: u32) -> Result<i32> {
 
 /// Who is on the board. Presence is diagnostic: it is never an authorization
 /// input, and a peer that has never been seen is still a valid peer.
-fn cmd_peers(json: bool) -> Result<i32> {
-    let client = RelayClient::from_env()?;
-    let res = client.peers()?;
+fn cmd_peers(json: bool, since: Option<&str>, watch: bool, watch_interval_ms: u64) -> Result<i32> {
+    let since_ms = since.map(parse_duration_ms).transpose()?;
+    let interval = Duration::from_millis(watch_interval_ms.max(10));
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&res)?);
-        return Ok(0);
+    loop {
+        let client = RelayClient::from_env()?;
+        let res = client.peers()?;
+        let now = idboard_core::now_ms();
+        let mut peers = res.peers;
+        if let Some(window) = since_ms {
+            let cutoff = now.saturating_sub(window as i64);
+            peers.retain(|peer| peer.last_seen_ms >= cutoff && peer.last_seen_ms > 0);
+        }
+
+        if json {
+            // Diagnostic only; the filter is local presentation, not a protocol change.
+            println!("{}", serde_json::json!({ "ok": res.ok, "peers": peers }));
+        } else {
+            for peer in &peers {
+                println!(
+                    "{:<16} {:<12} {}",
+                    peer.identity,
+                    peer.role,
+                    last_seen_label(now, peer.last_seen_ms)
+                );
+            }
+        }
+
+        if !watch {
+            return Ok(0);
+        }
+        println!("---");
+        std::thread::sleep(interval);
     }
-    let now = idboard_core::now_ms();
-    for peer in &res.peers {
-        println!(
-            "{:<16} {:<12} {}",
-            peer.identity,
-            peer.role,
-            last_seen_label(now, peer.last_seen_ms)
-        );
+}
+
+/// Parse a small human duration: `ms`, `s`, `m`, `h`, `d`, or bare seconds.
+fn parse_duration_ms(input: &str) -> Result<u64> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err(idboard_core::error::CoreError::bad_request("duration must not be empty"));
     }
-    Ok(0)
+    let (number, unit_ms) = if let Some(n) = s.strip_suffix("ms") {
+        (n, 1)
+    } else if let Some(n) = s.strip_suffix('s') {
+        (n, 1_000)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 60_000)
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n, 3_600_000)
+    } else if let Some(n) = s.strip_suffix('d') {
+        (n, 86_400_000)
+    } else {
+        (s, 1_000)
+    };
+    let value: u64 = number.trim().parse().map_err(|_| {
+        idboard_core::error::CoreError::bad_request(format!("invalid duration {input:?}; use e.g. 30s, 10m, 2h or 1d"))
+    })?;
+    if value == 0 {
+        return Err(idboard_core::error::CoreError::bad_request("duration must be greater than zero"));
+    }
+    value.checked_mul(unit_ms).ok_or_else(|| idboard_core::error::CoreError::bad_request(format!("duration {input:?} is too large")))
 }
 
 /// Render "when did we last hear from this identity" without a clock dependency.
@@ -935,5 +992,17 @@ mod tests {
             "seen just now",
             "a timestamp from the future is skew, not a negative age"
         );
+    }
+
+    #[test]
+    fn parse_duration_ms_accepts_common_units_and_bare_seconds() {
+        assert_eq!(parse_duration_ms("900ms").unwrap(), 900);
+        assert_eq!(parse_duration_ms("2s").unwrap(), 2_000);
+        assert_eq!(parse_duration_ms("3m").unwrap(), 180_000);
+        assert_eq!(parse_duration_ms("4h").unwrap(), 14_400_000);
+        assert_eq!(parse_duration_ms("1d").unwrap(), 86_400_000);
+        assert_eq!(parse_duration_ms("42").unwrap(), 42_000);
+        assert!(parse_duration_ms("0").is_err());
+        assert!(parse_duration_ms("soon").is_err());
     }
 }

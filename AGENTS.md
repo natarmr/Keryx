@@ -17,13 +17,13 @@ Not a git repo (no `.git`, though a `.gitignore` exists). There is no undo.
 
 ```sh
 cargo build --workspace      # REQUIRED before the e2e suite - see below
-cargo test --workspace       # 264 tests, ~60s   <-- this is the normal path
+cargo test --workspace       # 265 tests, ~60s   <-- this is the normal path
 .\scripts\check-custody.ps1 # read-only: who can reach the trust root and the socket
 .\scripts\check-custody-claims.ps1 # do the custody statements still tell the truth?
 .\scripts\harness-smoke.ps1 # opt-in: drive a real agent harness (costs tokens)
 ```
 
-264 = 227 unit + 37 e2e (262 pass, 2 `#[ignore]`d live-harness tests). The slow half is
+265 = 228 unit + 37 e2e (263 pass, 2 `#[ignore]`d live-harness tests). The slow half is
 `idboard-core`'s 46 tests at ~8-20s (key generation) and e2e at ~21s; everything else is
 under a second. A passing run prints only `test result: ok`
 lines and the rejections e2e *expects* on stderr — daemon-unreachable and wrapper-gone

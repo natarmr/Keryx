@@ -186,6 +186,7 @@ idboard post general --body-file report.txt  # large/multi-line body
 idboard read general --since 0
 idboard subscribe general                   # poll loop, prints as messages arrive
 idboard peers                               # who is on the board, and when each was last seen
+idboard peers --since 10m                   # only identities seen in the last 10m
 idboard doctor                              # local health check for config, keys and socket
 ```
 
@@ -480,7 +481,7 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 264 tests (262 pass, 2 `#[ignore]`d live-harness tests). 227 are unit tests over
+The suite is 265 tests (263 pass, 2 `#[ignore]`d live-harness tests). 228 are unit tests over
 the envelope, ACL matrix, storage, framing, the MCP server, and the wrapper's
 child environment. 37 are end-to-end (35 run by default): they spawn the real
 `idboard` and `idboardd` binaries, open real sockets, and attack the board with

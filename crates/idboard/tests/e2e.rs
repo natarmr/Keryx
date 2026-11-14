@@ -1300,6 +1300,13 @@ fn live_harness_posts(harness: &str, argv: &[String], prompt: &str, nonce: &str)
         );
     };
 
+    // Printed for the operator running the live smoke; this is board data, not a
+    // model self-report, so it is safe to quote in a local terminal.
+    eprintln!(
+        "board accepted live post from {} to {}: body={:?}",
+        message["sender_id"], message["channel"], message["body"]
+    );
+
     assert_eq!(
         message["sender_id"], "eng-01",
         "the harness posted under the wrong identity: {message:#?}"

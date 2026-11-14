@@ -2801,6 +2801,12 @@ fn board_summary(limit: u32) -> serde_json::Value {
             "can_post": digest.can_post,
             "cursor": digest.cursor,
             "messages": digest.messages.len(),
+            "full": digest.messages.iter().map(|message| serde_json::json!({
+                "channel": digest.channel,
+                "cursor": message.cursor,
+                "sender": message.envelope.sender_id,
+                "body": message.envelope.body,
+            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "tasks": {
             "open": task_open,
@@ -2820,7 +2826,7 @@ fn board_summary(limit: u32) -> serde_json::Value {
 fn web_data(limit: u32) -> serde_json::Value {
     let checks = collect_doctor_checks();
     let (problems, ok) = summarize_doctor_checks(&checks);
-    let board = board_summary(limit);
+    let board = web_board(limit);
     serde_json::json!({
         "ok": ok,
         "report_version": 1,
@@ -2828,6 +2834,33 @@ fn web_data(limit: u32) -> serde_json::Value {
         "problems": problems,
         "board": board,
     })
+}
+
+/// Board payload plus the peer roster. Peers are fetched here rather than in
+/// `board_summary` so the `console` report shape stays exactly as documented.
+fn web_board(limit: u32) -> serde_json::Value {
+    let mut board = board_summary(limit);
+    if board["available"].as_bool().unwrap_or(false) {
+        let peers = RelayClient::from_env()
+            .and_then(|client| client.peers())
+            .map(|res| {
+                res.peers
+                    .into_iter()
+                    .map(|peer| {
+                        serde_json::json!({
+                            "identity": peer.identity,
+                            "role": peer.role,
+                            "last_seen_ms": peer.last_seen_ms,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(object) = board.as_object_mut() {
+            object.insert("peers".to_string(), serde_json::Value::Array(peers));
+        }
+    }
+    board
 }
 
 fn response_for_request(request: &str, token: &str, limit: u32) -> (u16, &'static str, Vec<u8>) {
@@ -2951,199 +2984,276 @@ const WEB_HTML: &str = r#"<!doctype html>
 <link rel="icon" href="data:,">
 <style>
 :root {
-  color-scheme: light;
-  --paper: #ECE9DF;
-  --panel: #F7F5ED;
-  --ink: #1A1D24;
-  --muted: #5C6270;
-  --rule: #D3CEBD;
-  --hairline: #E2DECF;
-  --ok: #1F7A4D;
-  --warn: #A16207;
-  --bad: #B3261E;
+  color-scheme: dark;
+  --bg: #1e1f22;
+  --sidebar: #2b2d31;
+  --chat: #313338;
+  --hover: #35373c;
+  --active: #404249;
+  --text: #dbdee1;
+  --muted: #949ba4;
+  --brand: #5865f2;
+  --green: #23a55a;
+  --yellow: #f0b232;
+  --red: #f23f43;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
+html, body { height: 100%; }
 body {
   margin: 0;
-  background: var(--paper);
-  color: var(--ink);
-  font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
-header {
-  padding: 24px 28px 18px;
-  border-bottom: 3px double var(--ink);
+.topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 18px;
+  background: var(--chat);
+  border-bottom: 1px solid #1a1b1e;
+  flex: none;
 }
-h1 { font-size: 26px; margin: 0; font-weight: 800; letter-spacing: -0.01em; }
-h1 .thin { font-weight: 400; color: var(--muted); }
-.sub { color: var(--muted); margin-top: 2px; }
-.stamp {
+.topbar .hash { color: var(--muted); font-size: 22px; font-weight: 700; }
+.topbar .chan { font-weight: 700; font-size: 15px; }
+.topbar .topic { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar .spacer { flex: 1; }
+.pill { font-size: 12px; font-family: var(--mono); padding: 3px 10px; border-radius: 999px; border: 1px solid var(--muted); color: var(--muted); white-space: nowrap; }
+.pill.ok { color: var(--green); border-color: var(--green); }
+.pill.bad { color: var(--red); border-color: var(--red); }
+.shell { display: flex; flex: 1; min-height: 0; }
+.sidebar { background: var(--sidebar); overflow-y: auto; flex: none; }
+.sidebar.left { width: 248px; display: flex; flex-direction: column; }
+.sidebar.right { width: 244px; }
+.server-name {
+  padding: 14px 16px;
   font-weight: 800;
   font-size: 15px;
-  letter-spacing: 0.04em;
-  border: 3px double currentColor;
-  border-radius: 6px;
-  padding: 2px 12px;
-  transform: rotate(-2deg);
-  white-space: nowrap;
+  border-bottom: 1px solid #1a1b1e;
+  box-shadow: 0 1px 0 rgba(0,0,0,.2);
 }
-.stamp.ok { color: var(--ok); }
-.stamp.bad { color: var(--bad); }
-.stamp.idle { color: var(--muted); }
-.loopback { color: var(--muted); font-size: 12px; font-family: var(--mono); text-align: right; }
-h2 { font-size: 15px; font-weight: 700; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 2px solid var(--ink); }
-main { padding: 22px 28px 40px; max-width: 1180px; margin: 0 auto; display: grid; gap: 18px; }
-.grid { display: grid; gap: 16px; }
-.two { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
-.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 20px; }
-.panel.bad { border-color: var(--bad); border-top: 4px solid var(--bad); }
-.panel.warn { border-top: 4px solid var(--warn); }
-.panel.ok { border-top: 4px solid var(--ok); }
-.statusline { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-.badge { display: inline-block; font-size: 12px; font-family: var(--mono); padding: 3px 10px; border-radius: 999px; border: 1px solid var(--rule); }
-.badge.ok { color: var(--ok); border-color: var(--ok); }
-.badge.bad { color: var(--bad); border-color: var(--bad); }
-.muted { color: var(--muted); }
-.mono { font-family: var(--mono); }
-.ledger { width: 100%; border-collapse: collapse; font-size: 13px; }
-.ledger th { text-align: left; font-weight: 700; font-size: 12px; color: var(--muted); padding: 6px 8px 6px 0; border-bottom: 2px solid var(--ink); }
-.ledger td { padding: 7px 8px 7px 0; border-bottom: 1px solid var(--hairline); vertical-align: top; }
-.ledger tr:last-child td { border-bottom: none; }
-.ledger td.n, .figures .n { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.figures { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-top: 12px; border-top: 2px solid var(--ink); }
-.figure { padding: 10px 12px 6px 0; }
-.figure + .figure { border-left: 1px solid var(--hairline); padding-left: 12px; }
-.figure strong { display: block; font-size: 30px; line-height: 1.05; font-weight: 800; font-variant-numeric: tabular-nums; }
-.figure span { color: var(--muted); font-size: 12px; }
-ul.checks { margin: 0; padding: 0; list-style: none; }
-ul.checks li { margin: 0; padding: 7px 0 7px 26px; border-bottom: 1px solid var(--hairline); position: relative; }
-ul.checks li:last-child { border-bottom: none; }
-ul.checks li::before { position: absolute; left: 2px; font-family: var(--mono); font-weight: 700; }
-ul.checks li.ok::before { content: '✓'; color: var(--ok); }
-ul.checks li.fail::before { content: '!'; color: var(--bad); }
-li.fail { color: var(--bad); }
-li.ok { color: inherit; }
-.problem { color: var(--bad); font-family: var(--mono); font-size: 12px; margin-top: 8px; }
-.log { margin: 0; }
-.log .entry { display: grid; grid-template-columns: 64px 110px 110px 1fr; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--hairline); font-size: 13px; }
-.log .entry:last-child { border-bottom: none; }
-.log .cursor { font-family: var(--mono); color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
-.log .who { font-family: var(--mono); overflow-wrap: anywhere; }
-.log .body { overflow-wrap: anywhere; }
-.empty { color: var(--muted); font-style: italic; }
-footer { padding: 16px 28px 28px; color: var(--muted); font-size: 12px; border-top: 3px double var(--ink); max-width: 1180px; margin: 0 auto; }
-:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
-@media (max-width: 860px) { .two { grid-template-columns: 1fr; } .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); } .log .entry { grid-template-columns: 52px 1fr; } .log .who { display: none; } }
+.section { padding: 14px 8px 4px 16px; font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: 0.04em; }
+.chanrow {
+  display: flex; align-items: center; gap: 8px;
+  margin: 1px 8px; padding: 6px 10px; border-radius: 4px;
+  color: var(--muted); cursor: pointer; font-size: 14px;
+  border: none; background: none; width: calc(100% - 16px); text-align: left; font: inherit;
+}
+.chanrow:hover { background: var(--hover); color: var(--text); }
+.chanrow.sel { background: var(--active); color: #fff; }
+.chanrow .hash { color: var(--muted); font-size: 18px; font-weight: 400; }
+.chanrow .count { margin-left: auto; font-size: 11px; font-family: var(--mono); }
+.taskrow { display: block; margin: 1px 8px; padding: 6px 10px; border-radius: 4px; font-size: 13px; }
+.taskrow .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
+.taskrow .dot.open { background: var(--yellow); }
+.taskrow .dot.claimed { background: var(--brand); }
+.taskrow .dot.done { background: var(--green); }
+.taskrow .who { color: var(--muted); font-size: 11px; display: block; padding-left: 16px; }
+.checks { list-style: none; margin: 0; padding: 4px 8px; font-size: 12px; }
+.checks li { padding: 4px 8px; border-radius: 4px; color: var(--muted); }
+.checks li.fail { color: #f99; }
+.me {
+  margin-top: auto; display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; background: #232428; font-size: 13px;
+}
+.me .avatar { flex: none; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; color: #fff; }
+.me .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.me .who small { display: block; color: var(--muted); font-size: 11px; }
+.chat { flex: 1; background: var(--chat); display: flex; flex-direction: column; min-width: 0; }
+#recent { flex: 1; overflow-y: auto; padding: 12px 18px; }
+.msg { display: flex; gap: 14px; padding: 4px 0; }
+.msg.grouped { padding-top: 0; }
+.msg .avatar {
+  flex: none; width: 40px; height: 40px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 14px; color: #fff; margin-top: 2px;
+}
+.msg.grouped .avatar { visibility: hidden; height: 0; margin: 0; }
+.msg .body { min-width: 0; }
+.msg .head { display: flex; align-items: baseline; gap: 8px; }
+.msg .sender { font-weight: 600; color: #fff; }
+.msg .ts { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.msg .text { overflow-wrap: anywhere; white-space: pre-wrap; color: var(--text); }
+.msg .cursor { color: var(--muted); font-size: 11px; font-family: var(--mono); margin-left: 8px; }
+.divider { display: flex; align-items: center; gap: 8px; margin: 14px 0 6px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.divider::before { content: ''; flex: 1; border-top: 1px solid var(--active); }
+.composer {
+  margin: 0 18px 20px; padding: 11px 14px; border-radius: 8px;
+  background: #383a40; color: var(--muted); font-size: 14px; flex: none;
+}
+.composer code { font-family: var(--mono); color: var(--text); }
+.member { display: flex; align-items: center; gap: 10px; padding: 5px 16px; border-radius: 4px; margin: 1px 8px; }
+.member:hover { background: var(--hover); }
+.member .avatar {
+  flex: none; width: 32px; height: 32px; border-radius: 50%; position: relative;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 12px; color: #fff;
+}
+.member .dot {
+  position: absolute; right: -1px; bottom: -1px; width: 11px; height: 11px;
+  border-radius: 50%; border: 3px solid var(--sidebar);
+}
+.member .dot.on { background: var(--green); }
+.member .dot.off { background: #80848e; }
+.member .who { min-width: 0; }
+.member .name { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member .sub { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat { padding: 8px 16px; font-size: 12px; color: var(--muted); }
+.stat .mono { font-family: var(--mono); }
+.empty { color: var(--muted); font-style: italic; padding: 8px 16px; font-size: 13px; }
+footer { display: none; }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+@media (max-width: 1024px) { .sidebar.right { display: none; } }
+@media (max-width: 720px) {
+  body { overflow: auto; }
+  .shell { flex-direction: column; }
+  .sidebar.left, .sidebar.right { width: 100%; display: block; }
+  .chat { min-height: 60vh; }
+}
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
 <body>
-<header>
-  <div>
-    <h1>Keryx <span class="thin">console</span></h1>
-    <div class="sub">Read-only board health for operators and agents.</div>
-  </div>
-  <div>
-    <div class="stamp idle" id="header-stamp">loading</div>
-    <div class="loopback">served on loopback · stop with Ctrl-C</div>
-  </div>
+<header class="topbar">
+  <span class="hash">#</span>
+  <span class="chan" id="active-channel">…</span>
+  <span class="topic">Read-only mirror of the local board · <span id="board-identity" class="mono"></span></span>
+  <span class="spacer"></span>
+  <span class="pill" id="board-status">loading</span>
 </header>
-<main id="root">
-  <section class="panel ok" id="local-panel">
-    <h2>Local checks</h2>
-    <div id="local-summary" class="statusline"><span class="badge">loading…</span></div>
+<div class="shell">
+  <nav class="sidebar left" aria-label="channels and tasks">
+    <div class="server-name">Keryx console</div>
+    <div class="section">Text channels</div>
+    <div id="channel-list" role="listbox" aria-label="channels"></div>
+    <div class="section">Open tasks</div>
+    <div id="tasks-summary"><span class="empty">waiting for board data…</span></div>
+    <div class="section">System</div>
     <ul class="checks" id="local-checks"></ul>
     <div id="local-problems"></div>
-  </section>
-
-  <section class="grid two">
-    <div class="panel ok" id="board-panel">
-      <h2>Board</h2>
-      <div class="statusline"><span id="board-status" class="badge">loading…</span><span id="board-identity" class="muted mono"></span></div>
-      <div class="muted mono" id="board-age" style="margin-top:8px">last message: …</div>
-      <div class="figures">
-        <div class="figure"><strong id="channels">…</strong><span>channels</span></div>
-        <div class="figure"><strong id="tasks-open">…</strong><span>open</span></div>
-        <div class="figure"><strong id="tasks-claimed">…</strong><span>claimed</span></div>
-        <div class="figure"><strong id="tasks-done">…</strong><span>done</span></div>
-      </div>
-    </div>
-
-    <div class="panel" id="tasks-panel">
-      <h2>Tasks</h2>
-      <div id="tasks-summary" class="statusline"><span class="muted">waiting for board data…</span></div>
-      <div id="tasks-leases" class="mono muted" style="margin-top:8px"></div>
-      <div id="tasks-by-identity" class="mono muted" style="margin-top:12px"></div>
-    </div>
-  </section>
-
-  <section class="panel" id="recent-panel">
-    <h2>Recent messages</h2>
+    <div class="me"><span class="avatar" id="me-avatar" style="background:#5865f2">?</span><span class="who"><span id="me-name">…</span><small id="local-summary">read-only relay</small></span></div>
+  </nav>
+  <main class="chat" aria-label="messages">
     <div id="recent"><span class="empty">loading…</span></div>
-  </section>
-
-  <section class="panel" id="channels-panel">
-    <h2>Channels</h2>
-    <div id="channels-table"><span class="empty">loading…</span></div>
-  </section>
-</main>
-<footer><span class="mono">Keryx console</span> · served from the same process as the board, on loopback only. Body text and identities are shown as plain text only.</footer>
+    <div class="composer" aria-disabled="true">Read-only mirror — post with <code>keryx post</code></div>
+  </main>
+  <aside class="sidebar right" aria-label="members and stats">
+    <div class="section">Members</div>
+    <div id="peer-list"><span class="empty">loading…</span></div>
+    <div class="section">Board age</div>
+    <div class="stat mono" id="board-age">last message: …</div>
+    <div class="section">Claims</div>
+    <div class="stat mono" id="tasks-by-identity">—</div>
+    <div class="section">Leases</div>
+    <div class="stat mono" id="tasks-leases">—</div>
+    <div class="section">Local detail</div>
+    <div class="stat" id="local-detail">—</div>
+  </aside>
+</div>
+<footer>Keryx console · loopback only</footer>
 <script>
 const text = (v) => v === null || v === undefined ? '—' : String(v);
 const esc = (v) => String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = text(v); };
 function renderCheck(name, ok, detail) {
-  return `<li class="${ok ? 'ok' : 'fail'}"><span class="mono">${esc(name)}</span>: ${esc(detail)}</li>`;
+  return `<li class="${ok ? 'ok' : 'fail'}">${esc(name)}: ${esc(detail)}</li>`;
 }
-function renderRow(cells) {
-  return `<tr>${cells.map(c => `<td class="${c.mono ? 'n' : ''}">${esc(c.v)}</td>`).join('')}</tr>`;
+let selected = null;
+let channelMessages = {};
+const hueOf = (name) => { let h = 0; for (const ch of String(name)) h = (h * 31 + ch.codePointAt(0)) % 360; return h; };
+const avatarBg = (name) => `hsl(${hueOf(name)}, 45%, 42%)`;
+const initialsOf = (name) => String(name).split(/[^A-Za-z0-9]+/).filter(Boolean).map(w => w[0]).join('').slice(0, 2).toUpperCase() || '?';
+const agoMs = (ms) => {
+  if (ms == null || ms < 0) return 'never';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+};
+function renderChannels(channels) {
+  const box = document.getElementById('channel-list');
+  if (!channels.length) { box.innerHTML = '<span class="empty">no channels visible</span>'; return; }
+  if (!channels.some(c => c.channel === selected)) selected = channels[0].channel;
+  box.innerHTML = channels.map(c =>
+    `<button class="chanrow${c.channel === selected ? ' sel' : ''}" data-chan="${esc(c.channel)}" role="option" aria-selected="${c.channel === selected}"><span class="hash">#</span><span>${esc(c.channel)}</span><span class="count">${esc(c.messages)}</span></button>`).join('');
+  box.querySelectorAll('.chanrow').forEach(el => el.addEventListener('click', () => {
+    selected = el.getAttribute('data-chan');
+    renderChannels(channels);
+    renderMessages();
+  }));
 }
-function setStamp(state, label) {
-  const el = document.getElementById('header-stamp');
-  el.className = 'stamp ' + state;
-  el.textContent = label;
+function renderMessages() {
+  const box = document.getElementById('recent');
+  const messages = channelMessages[selected] || [];
+  setText('active-channel', selected || '—');
+  if (!messages.length) { box.innerHTML = '<span class="empty">no messages here yet</span>'; return; }
+  let html = '';
+  let lastSender = null;
+  for (const m of messages) {
+    const grouped = m.sender === lastSender;
+    lastSender = m.sender;
+    html += grouped
+      ? `<div class="msg grouped"><span class="avatar" aria-hidden="true"></span><div class="body"><div class="text">${esc(m.body)}<span class="cursor">#${esc(m.cursor)}</span></div></div></div>`
+      : `<div class="msg"><span class="avatar" style="background:${avatarBg(m.sender)}">${esc(initialsOf(m.sender))}</span><div class="body"><div class="head"><span class="sender">${esc(m.sender)}</span></div><div class="text">${esc(m.body)}<span class="cursor">#${esc(m.cursor)}</span></div></div></div>`;
+  }
+  box.innerHTML = html;
+  box.scrollTop = box.scrollHeight;
+}
+function renderPeers(peers) {
+  const box = document.getElementById('peer-list');
+  if (!peers || !peers.length) { box.innerHTML = '<span class="empty">no members</span>'; return; }
+  const now = Date.now();
+  const online = [], away = [];
+  for (const p of peers) {
+    const age = (p.last_seen_ms || 0) > 0 ? now - p.last_seen_ms : null;
+    (age !== null && age < 10 * 60 * 1000 ? online : away).push({ p, age });
+  }
+  const row = ({ p, age }) => `<div class="member"><span class="avatar" style="background:${avatarBg(p.identity)}">${esc(initialsOf(p.identity))}<span class="dot ${age !== null ? 'on' : 'off'}"></span></span><span class="who"><span class="name">${esc(p.identity)}</span><span class="sub">${esc(p.role)} · ${age === null ? 'never seen' : 'active ' + agoMs(age)}</span></span></div>`;
+  box.innerHTML =
+    `<div class="section">Online — ${online.length}</div>` + (online.length ? online.map(row).join('') : '<span class="empty">nobody active</span>') +
+    `<div class="section">Offline — ${away.length}</div>` + (away.length ? away.map(row).join('') : '<span class="empty">—</span>');
 }
 async function refresh() {
   const res = await fetch('./data', { cache: 'no-store' });
   if (!res.ok) {
-    document.getElementById('local-summary').innerHTML = '<span class="badge bad">console error</span>';
-    setStamp('bad', 'unreachable');
+    setText('board-status', 'console error');
     return;
   }
   const data = await res.json();
   const local = data.checks || [];
   const failed = local.filter(c => c.ok === false);
-  document.getElementById('local-panel').className = `panel ${failed.length ? 'bad' : 'ok'}`;
-  document.getElementById('local-summary').innerHTML =
-    `<span class="badge ${failed.length ? 'bad' : 'ok'}">${failed.length ? 'attention' : 'ok'}</span>` +
-    `<span class="muted">${failed.length} problem(s), ${local.length} check(s)</span>`;
+  setText('local-summary', failed.length ? `${failed.length} problem(s), ${local.length} check(s)` : `healthy · ${local.length} check(s)`);
+  document.getElementById('me-name').textContent = text(data.board && data.board.identity);
+  document.getElementById('me-avatar').textContent = initialsOf(data.board && data.board.identity);
+  document.getElementById('me-avatar').style.background = avatarBg(data.board && data.board.identity);
   document.getElementById('local-checks').innerHTML = local.map(c => renderCheck(c.name, c.ok !== false, c.detail || '')).join('');
-  document.getElementById('local-problems').innerHTML = (data.problems || []).map(p => `<div class="problem">problem: ${esc(p.check)}: ${esc(p.detail)}</div>`).join('');
+  document.getElementById('local-problems').innerHTML = (data.problems || []).map(p => `<div class="problem mono" style="padding:4px 16px;font-size:12px;color:var(--red)">problem: ${esc(p.check)}: ${esc(p.detail)}</div>`).join('');
 
   const board = data.board || {};
   const available = board.available === true;
-  document.getElementById('board-panel').className = `panel ${available ? 'ok' : 'bad'}`;
-  setText('board-status', available ? 'board online (inside wrapper)' : 'board unavailable: run inside `keryx run`');
+  const pill = document.getElementById('board-status');
+  pill.className = 'pill ' + (!available ? '' : failed.length ? 'bad' : 'ok');
+  setText('board-status', !available ? 'offline' : failed.length ? 'attention' : 'live');
   setText('board-identity', board.identity || '');
   setText('board-age', available
     ? `last message: ${board.last_message_age || 'never'}${board.last_message_age_ms != null ? ` (${board.last_message_age_ms} ms ago)` : ''}`
     : 'board unavailable: run inside `keryx run`');
-  setText('channels', (board.channels || []).length);
-  setText('tasks-open', board.tasks?.open ?? '—');
-  setText('tasks-claimed', board.tasks?.claimed ?? '—');
-  setText('tasks-done', board.tasks?.done ?? '—');
+  const channels = board.channels || [];
+  channelMessages = {};
+  for (const c of channels) channelMessages[c.channel] = (c.full || []).slice();
+  renderChannels(channels);
+  renderMessages();
 
   const oldest = board.tasks?.oldest_unclaimed;
-  const claimed = board.tasks?.claimed ?? 0;
-  const open = board.tasks?.open ?? 0;
-  document.getElementById('tasks-panel').className = `panel ${oldest ? 'warn' : ''}`;
   setText('tasks-summary', oldest
-    ? `oldest unclaimed task: ${oldest.id}, ${oldest.title} (${oldest.channel})`
+    ? `oldest unclaimed: ${oldest.id}, ${oldest.title} (${oldest.channel})`
     : 'no unclaimed tasks');
   setText('tasks-leases', `leases: ${board.tasks?.leases_active ?? 0} active, ${board.tasks?.leases_expired ?? 0} expired`);
   const by = board.tasks?.claimed_by || {};
@@ -3151,18 +3261,10 @@ async function refresh() {
     Object.entries(by).length
       ? Object.entries(by).map(([who, n]) => `${who}: ${n} claimed`).join(', ')
       : 'nobody holds a claim right now';
-  setStamp(!available ? 'idle' : failed.length ? 'bad' : (oldest || claimed || open) ? 'warn' : 'ok',
-    !available ? 'offline' : failed.length ? 'attention' : (oldest || claimed || open) ? 'action' : 'clear');
-
-  const recent = board.recent || [];
-  document.getElementById('recent').innerHTML = recent.length
-    ? `<div class="log" role="table" aria-label="recent messages">${recent.map(m => `<div class="entry" role="row"><span class="cursor">${esc(m.cursor)}</span><span class="who">${esc(m.sender)}</span><span class="mono">${esc(m.channel)}</span><span class="body">${esc(m.body)}</span>`).join('')}</div>`
-    : '<span class="empty">no recent messages</span>';
-
-  const channels = board.channels || [];
-  document.getElementById('channels-table').innerHTML = channels.length
-    ? `<table class="ledger"><thead><tr><th>channel</th><th>access</th><th>cursor</th><th>messages</th></tr></thead><tbody>${channels.map(c => renderRow([{v:c.channel,mono:true},{v:`read=${c.can_read} post=${c.can_post}`},{v:c.cursor,mono:true},{v:c.messages,mono:true}])).join('')}</tbody></table>`
-    : '<span class="empty">no channels visible</span>';
+  setText('local-detail', available
+    ? `${channels.length} channel(s) · open ${board.tasks?.open ?? 0}, claimed ${board.tasks?.claimed ?? 0}, done ${board.tasks?.done ?? 0}`
+    : 'board unavailable: run inside `keryx run`');
+  renderPeers(board.peers, Date.now());
 }
 refresh();
 setInterval(refresh, 2000);

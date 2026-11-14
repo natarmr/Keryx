@@ -39,6 +39,7 @@
 //! process. Closing that needs one OS user per identity, which is deferred.
 
 pub mod client;
+pub mod cursor;
 pub mod keystore;
 pub mod lock;
 pub mod mcp;

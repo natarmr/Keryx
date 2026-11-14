@@ -234,8 +234,8 @@ fn handle_post(
     let now = clock();
     if !budget.allow(&identity.name, now, config.limits()) {
         let limits = config.limits();
-        let retry_after = budget.seconds_until_slot(&identity.name, now, limits);
-        return Err(CoreError::new(
+        let retry = budget.seconds_until_slot(&identity.name, now, limits);
+        let err = CoreError::new(
             ErrorCode::RateLimited,
             format!(
                 "identity {:?} has used its budget of {} posts per {}s. Reads are not \
@@ -244,9 +244,10 @@ fn handle_post(
                 identity.name,
                 limits.posts_per_window,
                 limits.window_ms / 1000,
-                retry_after
+                retry
             ),
-        ));
+        );
+        return Ok(DaemonResponse::from_err(&err).with_retry_after(Some(retry.saturating_mul(1000))));
     }
 
     let stored = store.append(&identity.name, env, now)?;
@@ -1347,6 +1348,10 @@ read = ["lead"]
         }
         let res = f.board.handle(&post_req(&f.eng, "general", "over", 4));
         assert_eq!(res.error, Some(ErrorCode::RateLimited), "{res:?}");
+        assert!(
+            res.retry_after_ms.unwrap_or(0) > 0,
+            "a rate-limited response must carry a retry hint: {res:?}"
+        );
 
         // The budget is per identity: another identity is unaffected.
         let res = f.board.handle(&post_req(&f.lead, "general", "lead post", 1));

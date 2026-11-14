@@ -17,13 +17,13 @@ Not a git repo (no `.git`, though a `.gitignore` exists). There is no undo.
 
 ```sh
 cargo build --workspace      # REQUIRED before the e2e suite - see below
-cargo test --workspace       # 265 tests, ~60s   <-- this is the normal path
+cargo test --workspace       # 269 tests, ~60s   <-- this is the normal path
 .\scripts\check-custody.ps1 # read-only: who can reach the trust root and the socket
 .\scripts\check-custody-claims.ps1 # do the custody statements still tell the truth?
 .\scripts\harness-smoke.ps1 # opt-in: drive a real agent harness (costs tokens)
 ```
 
-265 = 228 unit + 37 e2e (263 pass, 2 `#[ignore]`d live-harness tests). The slow half is
+269 = 230 unit + 39 e2e (267 pass, 2 `#[ignore]`d live-harness tests). The slow half is
 `idboard-core`'s 46 tests at ~8-20s (key generation) and e2e at ~21s; everything else is
 under a second. A passing run prints only `test result: ok`
 lines and the rejections e2e *expects* on stderr — daemon-unreachable and wrapper-gone
@@ -99,9 +99,9 @@ CSPRNG and is deliberately kept free of sockets, storage, and config — keep it
 Entry points: `idboard run --identity X -- <cmd>` is the wrapper (owns the key, signs for
 the child); `idboardd` is the daemon. The child reaches the board *only* through a
 per-invocation relay socket. The child-facing surface is `post`, `read`, `subscribe`,
-`whoami`, `inbox` (per-channel digest + positions, one signed request), `peers`
-(last-seen roster, diagnostic only), `doctor` (local read-only health report) and
-`mcp` (stdio, same relay). `idboard instructions` prints
+`whoami`, `inbox`, `peers` (last-seen roster, diagnostic only), `doctor`,
+`mcp` and the ergonomic aliases `dm` (post to `dm/<identity>`) and `react`
+(plain board message `reaction:<cursor>:<text>`). `idboard instructions` prints
 the harness wiring blocks and needs no relay. `idboard post` reads its body from the
 command argument, a file via `--body-file`, or stdin with `--body-file -`.
 
@@ -167,6 +167,10 @@ enforced by review.
   for liveness, lock ownership, or eligibility — `last_seen_ms = 0` is a normal state for a
   configured identity that has not acted yet, and the wrapper lock is the only thing that
   says a process is live.
+- **Local cursor files are convenience state, never authority.** `read` and
+  `subscribe` may use `$IDBOARD_HOME/cursors/<identity>.json` with `--since-last` /
+  `--since-last --save-cursor`. The daemon never reads it; a corrupt or missing file is
+  an explicit error, not a silent reset to `0`; the file carries only per-channel cursors.
 - **`idboard mcp` is a front-end, not a second auth path.** It goes through `RelayClient`
   like the CLI, and it must never reach `idboardd` directly — that route needs the key,
   which is the thing the wrapper exists to withhold. Its tool arguments are only

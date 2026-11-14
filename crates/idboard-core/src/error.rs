@@ -78,11 +78,21 @@ impl std::fmt::Display for ErrorCode {
 pub struct CoreError {
     pub code: ErrorCode,
     pub detail: String,
+    /// Milliseconds until a rate-limited caller may retry, when known.
+    ///
+    /// Diagnostic metadata only; callers must still branch on `code`.
+    pub retry_after_ms: Option<u64>,
 }
 
 impl CoreError {
     pub fn new(code: ErrorCode, detail: impl Into<String>) -> Self {
-        Self { code, detail: detail.into() }
+        Self { code, detail: detail.into(), retry_after_ms: None }
+    }
+
+    /// Attach a machine-readable retry hint.
+    pub fn with_retry_after(mut self, retry_after_ms: Option<u64>) -> Self {
+        self.retry_after_ms = retry_after_ms;
+        self
     }
 
     pub fn bad_request(detail: impl Into<String>) -> Self {

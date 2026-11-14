@@ -3,7 +3,7 @@
 //! Kept separate from `main.rs` so the output formatting is testable, and so the
 //! binary stays a shell around [`run_cli`].
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use idboard_core::error::Result;
@@ -14,6 +14,7 @@ use idboard_core::{Provenance, validate_body, validate_channel, validate_identit
 // This module belongs to the *binary*, so it reaches the library by name rather
 // than through `crate::`, which here would mean `main.rs`.
 use idboard::client::RelayClient;
+use idboard::cursor::CursorStore;
 use idboard::keystore::Keystore;
 use idboard::wrapper::{self, WrapperOptions};
 
@@ -49,8 +50,14 @@ enum Command {
     Read {
         channel: String,
         /// Only messages after this cursor. `0` means from the beginning.
-        #[arg(long, default_value_t = 0)]
-        since: i64,
+        #[arg(long)]
+        since: Option<i64>,
+        /// Read from the saved local cursor for this channel.
+        #[arg(long)]
+        since_last: bool,
+        /// Save the returned position as this channel's local cursor.
+        #[arg(long)]
+        save_cursor: bool,
         /// Maximum messages to return.
         #[arg(long, default_value_t = DEFAULT_READ_LIMIT)]
         limit: u32,
@@ -65,6 +72,18 @@ enum Command {
         /// Start from this cursor rather than only new messages.
         #[arg(long)]
         since: Option<i64>,
+        /// Start from the saved local cursor for this channel.
+        #[arg(long)]
+        since_last: bool,
+        /// Save the newest position seen while polling.
+        #[arg(long)]
+        save_cursor: bool,
+        /// Stop after this wall-clock duration, e.g. `30s`, `10m` or `1h`.
+        #[arg(long = "for")]
+        for_: Option<String>,
+        /// Stop after printing a message containing this text.
+        #[arg(long)]
+        exit_on: Option<String>,
         /// Stop after this many messages. Useful for scripted checks.
         #[arg(long)]
         count: Option<u64>,
@@ -75,6 +94,12 @@ enum Command {
         /// Messages per channel. `0` prints the channel list and positions only.
         #[arg(long, default_value_t = 5)]
         limit: u32,
+        /// Only show channels whose saved local cursor has advanced.
+        #[arg(long)]
+        since_last: bool,
+        /// Save each channel's reported position as its local cursor.
+        #[arg(long)]
+        save_cursor: bool,
     },
 
     /// Show who is on the board and when each identity was last seen.
@@ -88,6 +113,28 @@ enum Command {
         /// Milliseconds between `--watch` refreshes.
         #[arg(long, default_value_t = 2000)]
         watch_interval_ms: u64,
+    },
+
+    /// Send a message to a `dm/<identity>` channel.
+    Dm {
+        identity: String,
+        /// Message text. Omit when using `--body-file`.
+        body: Option<String>,
+        /// Read the body from a file. `-` reads stdin.
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<std::path::PathBuf>,
+        /// Where this text came from. A channel may forbid external content.
+        #[arg(long, value_enum, default_value_t = ProvenanceArg::SelfOriginated)]
+        provenance: ProvenanceArg,
+    },
+
+    /// Post a lightweight reaction to a message.
+    React {
+        channel: String,
+        /// Cursor of the message being reacted to.
+        cursor: i64,
+        /// Short reaction text, e.g. a word or emoji.
+        reaction: String,
     },
 
     /// Check the local idboard installation and report problems.
@@ -192,12 +239,32 @@ fn dispatch(cli: Cli) -> Result<i32> {
             let body = read_body(body.as_deref(), body_file.as_deref())?;
             cmd_post(json, &channel, &body, provenance.into())
         }
-        Command::Read { channel, since, limit } => cmd_read(json, &channel, since, limit),
-        Command::Subscribe { channel, interval_ms, since, count } => {
-            cmd_subscribe(json, &channel, interval_ms, since, count)
+        Command::Read { channel, since, since_last, save_cursor, limit } => {
+            cmd_read(json, &channel, since, since_last, save_cursor, limit)
+        }
+        Command::Subscribe { channel, interval_ms, since, since_last, save_cursor, for_, exit_on, count } => {
+            cmd_subscribe(json, &channel, interval_ms, since, since_last, save_cursor, for_.as_deref(), exit_on.as_deref(), count)
+        }
+        Command::Dm { identity, body, body_file, provenance } => {
+            let channel = format!("dm/{identity}");
+            validate_channel(&channel)?;
+            let body = read_body(body.as_deref(), body_file.as_deref())?;
+            cmd_post(json, &channel, &body, provenance.into())
+        }
+        Command::React { channel, cursor, reaction } => {
+            if cursor <= 0 {
+                return Err(idboard_core::error::CoreError::bad_request("reaction cursor must be positive"));
+            }
+            validate_channel(&channel)?;
+            if reaction.is_empty() || reaction.len() > 128 {
+                return Err(idboard_core::error::CoreError::bad_request("reaction must be non-empty and at most 128 bytes"));
+            }
+            cmd_post(json, &channel, &format!("reaction:{cursor}:{reaction}"), Provenance::SelfOriginated)
         }
         Command::Whoami => cmd_whoami(json),
-        Command::Inbox { limit } => cmd_inbox(json, limit),
+        Command::Inbox { limit, since_last, save_cursor } => {
+            cmd_inbox(json, limit, since_last, save_cursor)
+        }
         Command::Peers { since, watch, watch_interval_ms } => {
             cmd_peers(json, since.as_deref(), watch, watch_interval_ms)
         }
@@ -248,7 +315,26 @@ fn read_body(body: Option<&str>, file: Option<&std::path::Path>) -> Result<Strin
 fn cmd_post(json: bool, channel: &str, body: &str, provenance: Provenance) -> Result<i32> {
     validate_channel(channel)?;
     let client = RelayClient::from_env()?;
-    let res = client.post(channel, body, provenance)?;
+    let res = match client.post(channel, body, provenance) {
+        Ok(res) => res,
+        Err(e) => {
+            // `--json` keeps failures machine-readable too, including the
+            // optional rate-limit hint.
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": false,
+                        "error": e.code.as_str(),
+                        "detail": e.detail,
+                        "retry_after_ms": e.retry_after_ms,
+                    })
+                );
+                return Ok(1);
+            }
+            return Err(e);
+        }
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&res)?);
     } else {
@@ -257,23 +343,59 @@ fn cmd_post(json: bool, channel: &str, body: &str, provenance: Provenance) -> Re
     Ok(0)
 }
 
-fn cmd_read(json: bool, channel: &str, since: i64, limit: u32) -> Result<i32> {
+fn identity_for_cursor(client: &RelayClient, needed: bool) -> Result<Option<String>> {
+    if !needed {
+        return Ok(None);
+    }
+    Ok(Some(client.whoami()?.identity))
+}
+
+fn cursor_store(client: &RelayClient, since: Option<i64>, since_last: bool, save_cursor: bool) -> Result<Option<CursorStore>> {
+    if since.is_some() && since_last {
+        return Err(idboard_core::error::CoreError::bad_request("pass either --since or --since-last, not both"));
+    }
+    Ok(identity_for_cursor(client, since_last || save_cursor)?
+        .map(|identity| CursorStore::for_identity(&identity))
+        .transpose()?)
+}
+
+fn cmd_read(
+    json: bool,
+    channel: &str,
+    since: Option<i64>,
+    since_last: bool,
+    save_cursor: bool,
+    limit: u32,
+) -> Result<i32> {
     validate_channel(channel)?;
     let client = RelayClient::from_env()?;
-    let res = client.read(channel, since, limit)?;
+    let mut store = cursor_store(&client, since, since_last, save_cursor)?;
+    let cursor = match (since, since_last) {
+        (Some(s), _) => s,
+        (None, true) => store.as_ref().expect("store is open for since_last").get(channel),
+        (None, false) => 0,
+    };
+    let res = client.read(channel, cursor, limit)?;
+    let final_cursor = res.cursor.unwrap_or(cursor);
+    if let Some(mut store) = store.take() {
+        if save_cursor {
+            store.set(channel, final_cursor);
+        }
+        store.flush()?;
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&res)?);
         return Ok(0);
     }
     if res.messages.is_empty() {
-        eprintln!("no messages in {channel} after cursor {since}");
+        eprintln!("no messages in {channel} after cursor {cursor}");
         return Ok(0);
     }
     for m in &res.messages {
         println!("{}", render_message(&m.envelope.sender_id, m.cursor, &m.envelope.provenance, &m.envelope.body));
     }
-    eprintln!("-- cursor {} --", res.cursor.unwrap_or(since));
+    eprintln!("-- cursor {} --", final_cursor);
     Ok(0)
 }
 
@@ -290,44 +412,80 @@ fn cmd_subscribe(
     channel: &str,
     interval_ms: u64,
     since: Option<i64>,
+    since_last: bool,
+    save_cursor: bool,
+    for_: Option<&str>,
+    exit_on: Option<&str>,
     count: Option<u64>,
 ) -> Result<i32> {
     validate_channel(channel)?;
     let client = RelayClient::from_env()?;
     let interval = Duration::from_millis(interval_ms.max(10));
+    let mut store = cursor_store(&client, since, since_last, save_cursor)?;
 
     // Without an explicit start, begin at the current end so a subscriber does
     // not replay history. That matches "presence = alive and asking".
     // `SINCE_CURRENT_END` is the daemon's documented way to ask for exactly that;
     // it answers with the real high-water mark rather than echoing the sentinel.
-    let mut cursor = match since {
-        Some(s) => s,
-        None => client
+    let mut cursor = match (since, since_last) {
+        (Some(s), _) => s,
+        (None, true) => store.as_ref().expect("store is open for since_last").get(channel),
+        (None, false) => client
             .read(channel, idboard_core::SINCE_CURRENT_END, 1)?
             .cursor
             .unwrap_or(0),
     };
+    let deadline = for_.map(parse_duration_ms).transpose()?.map(|ms| Instant::now() + Duration::from_millis(ms));
     let mut seen: u64 = 0;
 
     loop {
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            if let Some(mut store) = store {
+                store.flush()?;
+            }
+            return Ok(0);
+        }
         let res = client.read(channel, cursor, DEFAULT_READ_LIMIT)?;
         for m in &res.messages {
+            let rendered = render_message(
+                &m.envelope.sender_id,
+                m.cursor,
+                &m.envelope.provenance,
+                &m.envelope.body,
+            );
             if json {
                 println!("{}", serde_json::to_string(m)?);
             } else {
-                println!(
-                    "{}",
-                    render_message(&m.envelope.sender_id, m.cursor, &m.envelope.provenance, &m.envelope.body)
-                );
+                println!("{rendered}");
             }
             seen += 1;
+            if let Some(store) = store.as_mut() {
+                if save_cursor {
+                    store.set(channel, m.cursor);
+                }
+            }
+            if exit_on.is_some_and(|needle| m.envelope.body.contains(needle)) {
+                if let Some(mut store) = store {
+                    store.flush()?;
+                }
+                return Ok(0);
+            }
             if let Some(limit) = count {
                 if seen >= limit {
+                    if let Some(mut store) = store {
+                        store.flush()?;
+                    }
                     return Ok(0);
                 }
             }
         }
         cursor = res.cursor.unwrap_or(cursor);
+        if let Some(store) = store.as_mut() {
+            if save_cursor {
+                store.set(channel, cursor);
+                store.flush()?;
+            }
+        }
         std::thread::sleep(interval);
     }
 }
@@ -363,9 +521,14 @@ You are running as the idboard identity `{name}`.
 - `idboard inbox` lists every channel you can see, the newest messages in each,
   and the cursor each one is at. Run this first.
 - `idboard post <channel> \"<message>\"` sends a message.
+- `idboard post <channel> --body-file <path>` sends a multi-line body (`-` reads stdin).
 - `idboard read <channel> --since <cursor> --json` reads; the reply carries the
-  `cursor` to pass as `--since` next time.
-- `idboard subscribe <channel>` watches a channel and prints messages as they arrive.
+  `cursor` to pass as `--since` next time. `--since-last` resumes from a saved
+  local position per channel; `--save-cursor` updates it.
+- `idboard subscribe <channel>` watches a channel and prints messages as they arrive
+  (`--for 10m` to bound the run, `--exit-on <text>` to stop on a trigger).
+- `idboard react <channel> <cursor> <reaction>` posts a lightweight reaction message.
+- `idboard dm <identity> \"<message>\"` posts to `dm/<identity>` (ACL decides who can read).
 - `idboard whoami` confirms which identity you are.
 - `idboard peers --since 10m` narrows that roster to identities seen recently;
   `idboard peers --watch` refreshes it. Presence is diagnostic only: a peer
@@ -425,37 +588,51 @@ impl HarnessArg {
 /// This is the question a freshly launched agent actually has, and it costs one
 /// signed request instead of one per channel. The daemon decides which channels
 /// appear, so this can never show a channel the caller could not read.
-fn cmd_inbox(json: bool, limit: u32) -> Result<i32> {
+fn cmd_inbox(json: bool, limit: u32, since_last: bool, save_cursor: bool) -> Result<i32> {
     let client = RelayClient::from_env()?;
-    let res = client.inbox(limit)?;
+    let mut res = client.inbox(limit)?;
+    let mut store = cursor_store(&client, None, since_last, save_cursor)?;
+
+    if let Some(store) = store.as_ref() {
+        if since_last {
+            res.channels.retain(|digest| digest.cursor > store.get(&digest.channel));
+        }
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&res)?);
-        return Ok(0);
-    }
-    if res.channels.is_empty() {
-        eprintln!("no channels are visible to this identity");
-        return Ok(0);
-    }
-
-    for digest in &res.channels {
-        let access = match (digest.can_read, digest.can_post) {
-            (true, true) => "read+post",
-            (true, false) => "read",
-            (false, true) => "post only",
-            (false, false) => continue,
-        };
-        println!(
-            "== {} == ({access}, cursor {})",
-            digest.channel, digest.cursor
-        );
-        for m in &digest.messages {
-            println!(
-                "{}",
-                render_message(&m.envelope.sender_id, m.cursor, &m.envelope.provenance, &m.envelope.body)
-            );
+    } else {
+        if res.channels.is_empty() {
+            eprintln!("no channels are visible to this identity");
+        } else {
+            for digest in &res.channels {
+                let access = match (digest.can_read, digest.can_post) {
+                    (true, true) => "read+post",
+                    (true, false) => "read",
+                    (false, true) => "post only",
+                    (false, false) => continue,
+                };
+                println!(
+                    "== {} == ({access}, cursor {})",
+                    digest.channel, digest.cursor
+                );
+                for m in &digest.messages {
+                    println!(
+                        "{}",
+                        render_message(&m.envelope.sender_id, m.cursor, &m.envelope.provenance, &m.envelope.body)
+                    );
+                }
+                println!();
+            }
         }
-        println!();
+    }
+    if let Some(mut store) = store.take() {
+        if save_cursor {
+            for digest in &res.channels {
+                store.set(&digest.channel, digest.cursor);
+            }
+        }
+        store.flush()?;
     }
     Ok(0)
 }

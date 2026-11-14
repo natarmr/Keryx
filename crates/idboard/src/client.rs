@@ -152,7 +152,8 @@ impl RelayClient {
             return Err(CoreError::new(
                 res.error.unwrap_or(ErrorCode::Internal),
                 res.detail.unwrap_or_else(|| "the relay refused the request".into()),
-            ));
+            )
+            .with_retry_after(res.retry_after_ms));
         }
         Ok(res)
     }

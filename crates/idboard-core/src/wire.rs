@@ -206,6 +206,9 @@ pub struct DaemonResponse {
     /// Populated for a `peers`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<PeerStatus>,
+    /// Milliseconds until a rate-limited caller may retry, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
     /// Populated for a `whoami`, which never reaches the daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<RelayIdentity>,
@@ -227,7 +230,14 @@ impl DaemonResponse {
             identity: None,
             error: None,
             detail: None,
+            retry_after_ms: None,
         }
+    }
+
+    /// Approximate retry eligibility for a rate-limited caller, in milliseconds.
+    pub fn with_retry_after(mut self, retry_after_ms: Option<u64>) -> Self {
+        self.retry_after_ms = retry_after_ms;
+        self
     }
 
     pub fn with_cursor(mut self, cursor: i64) -> Self {
@@ -274,6 +284,7 @@ impl DaemonResponse {
             identity: None,
             error: Some(code),
             detail: Some(detail.into()),
+            retry_after_ms: None,
         }
     }
 

@@ -1487,6 +1487,46 @@ fn inbox_and_peers_are_inert_outside_a_wrapper() {
 }
 
 #[test]
+fn saving_and_resuming_a_cursor_is_idempotent() {
+    let b = TestBoard::start();
+    let out = b.post("eng-01", "general", "resume this cursor");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // First call reads the existing message and records the position.
+    let out = b.as_identity("eng-01", &["read", "general", "--since", "0", "--save-cursor"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // Resuming from the saved position must not re-deliver it.
+    let out = b.as_identity("eng-01", &["read", "general", "--since-last"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!stdout.contains("resume this cursor"), "cursor resume re-delivered old history: {stdout}");
+
+    // A new post becomes visible to the resumed reader.
+    let out = b.post("eng-02", "general", "after saved position");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = b.as_identity("eng-01", &["read", "general", "--since-last"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("after saved position"), "resumed read missed the new message: {stdout}");
+}
+
+#[test]
+fn subscribe_exit_on_stops_after_a_matching_body() {
+    let b = TestBoard::start();
+    b.post("eng-01", "general", "start");
+    b.post("eng-02", "general", "stop here");
+
+    // `--since 0` starts from the beginning; the subscriber exits on the trigger.
+    let out = b.as_identity(
+        "eng-01",
+        &["subscribe", "general", "--since", "0", "--exit-on", "stop here"],
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("stop here"));
+}
+
+
+#[test]
 fn post_body_file_is_read_as_the_message_body() {
     let b = TestBoard::start();
     let body_path = b.home.path().join("body.txt");

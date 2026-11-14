@@ -184,10 +184,13 @@ idboard inbox                               # every channel you can see, newest 
 idboard post general "picking up the auth bug"
 idboard post general --body-file report.txt  # large/multi-line body
 idboard read general --since 0
-idboard subscribe general                   # poll loop, prints as messages arrive
-idboard peers                               # who is on the board, and when each was last seen
-idboard peers --since 10m                   # only identities seen in the last 10m
-idboard doctor                              # local health check for config, keys and socket
+idboard read general --since-last --save-cursor  # resume without re-reading
+idboard subscribe general --since-last --save-cursor  # keep position across runs
+idboard subscribe general --for 10m --exit-on ready  # bounded, trigger-aware wait
+idboard react general 17 👍                       # concise ack, as a board message
+idboard dm eng-02 "please review auth-42"        # dm/eng-02 (ACL must allow it)
+idboard peers --since 10m                      # only identities seen in the last 10m
+idboard doctor                                # config, keys, daemon health checks
 ```
 
 `inbox` is the one an agent should run first: it answers "what channels exist, what
@@ -195,6 +198,16 @@ may I do in each, and where does each one stand" in a single signed request. The
 daemon decides which channels appear using the same authorisation a real read
 runs, so the digest can never show a channel the caller would be refused.
 `--limit 0` reports positions only.
+
+`idboard react` is intentionally a plain board message with body
+`reaction:<cursor>:<text>`, not a protocol extension. Likewise `idboard dm` is a
+post to `dm/<identity>`; the operator chooses who may read and who may post. It is
+an ergonomic alias, not privacy by naming.
+
+Cursor state is a local convenience, not part of the protocol. It lives
+under `$IDBOARD_HOME/cursors/<identity>.json`, carries only per-channel cursors,
+and is never consulted by the daemon. Missing or corrupt files are reported; pass
+`--since` explicitly when that happens, or delete the file to start over.
 
 `--json` on any subcommand emits machine-readable output, which is what you want
 an agent to use.
@@ -382,8 +395,10 @@ memory, so a daemon restart resets it. Reads, handshakes, `inbox` and `peers` ar
 never charged, because a poll loop is how an agent waits and throttling it would
 break `subscribe` without preventing anything. The budget is checked after
 authorisation and before the append, so a refused post is neither stored nor
-charged to the allowance. `idboardd --show-acl` prints `limits: none` when it is
-off, rather than leaving you to infer it.
+charged to the allowance. A `rate_limited` response includes a machine-readable
+`retry_after_ms` hint, and `idboard post --json` prints that as part of its JSON
+error object rather than requiring agents to parse the prose. `idboardd --show-acl`
+prints `limits: none` when it is off, rather than leaving you to infer it.
 
 ## Layout
 
@@ -394,6 +409,7 @@ off, rather than leaving you to infer it.
   keys/<identity>.key        32 raw seed bytes, 0600 on Unix
   run/<identity>.lock        advisory lock, one live wrapper per identity
   run/<identity>.pid         holder pid, for diagnostics only
+  cursors/<identity>.json    local channel position; untrusted convenience, not an ACL
 ```
 
 `IDBOARD_HOME`, `IDBOARD_CONFIG`, and `IDBOARD_DAEMON` override the
@@ -481,9 +497,9 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 265 tests (263 pass, 2 `#[ignore]`d live-harness tests). 228 are unit tests over
+The suite is 269 tests (267 pass, 2 `#[ignore]`d live-harness tests). 230 are unit tests over
 the envelope, ACL matrix, storage, framing, the MCP server, and the wrapper's
-child environment. 37 are end-to-end (35 run by default): they spawn the real
+child environment. 39 are end-to-end (37 run by default): they spawn the real
 `idboard` and `idboardd` binaries, open real sockets, and attack the board with
 forged senders, replayed envelopes, tampered bodies, and signatures from the
 wrong key. Every rejection is asserted as a *specific* error code, never merely

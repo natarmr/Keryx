@@ -72,3 +72,17 @@ The audit predates `keryx mcp`, `keryx inbox`, `keryx peers`, and
 
 Each of those has a test in the crate that owns it, and the tests assert on a
 specific `ErrorCode` rather than on "not ok".
+
+## Key storage hygiene (future OS-keyring direction, not implemented)
+
+Seeds stay as `0600` files under `keys/` today; no keyring code exists. A
+future move to an OS keyring (DPAPI / libsecret / Keychain) would change where
+bytes rest, not the trust model: a same-user process remains in-boundary by
+design, and the rotation story is already fixed as `keryx keygen <id> --force`
+(remove-then-create through the atomic link path, after printing the old
+pubkey/fingerprint warning) + config `pubkey` update + daemon restart, which is
+the path the startup rotation warning already watches. `--dry-run` exists so an
+operator can preview the pubkey/fingerprint without touching disk, and
+`keryx doctor`'s `key-permissions` check (Unix: warn on group/other-readable;
+Windows: inherited-DACL note, no enforcement claimed) is the observable that a
+keyring move would have to keep reporting against.

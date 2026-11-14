@@ -47,7 +47,8 @@ pub enum KeystoreError {
     },
 
     #[error("a key for {identity:?} already exists at {path}; refusing to replace it. \
-             Run `keryx keygen {identity}` to print the key that is actually on disk")]
+             Run `keryx keygen {identity}` to print the key that is actually on disk, \
+             or `keryx keygen {identity} --force` to rotate (then update the config pubkey and restart the daemon)")]
     AlreadyExists { identity: String, path: String },
 }
 

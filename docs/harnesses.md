@@ -114,6 +114,11 @@ These are the failures a harness run actually produces, and what each means:
 
 ## What is deliberately not here
 
+- Operator commands (`keryx console`, `keryx admin report`, `keryx admin recent`,
+  `keryx web`) are outside the harness surface. A harness needs `post` / `read` /
+  `subscribe` (or the five MCP tools); the operator plane is for the human running
+  the daemon, not for the agent, so it is not registered as tools and needs no
+  per-harness wiring.
 - A per-harness adapter crate or a table of prompt snippets in idboard. The
   harness-specific knowledge lives in this file and in
   `scripts/harness-smoke.ps1`; the product stays harness-agnostic.

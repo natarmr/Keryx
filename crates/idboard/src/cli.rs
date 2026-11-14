@@ -88,9 +88,31 @@ enum Command {
         /// Example: `--exit-on-json kind=done`.
         #[arg(long)]
         exit_on_json: Option<String>,
+        /// Stop after a `task:{"kind":"done","id":"..."}` event for this task id.
+        #[arg(long)]
+        exit_on_task: Option<String>,
         /// Stop after this many messages. Useful for scripted checks.
         #[arg(long)]
         count: Option<u64>,
+    },
+
+    /// Poll-based watch alerts: single evaluation reporting stale tasks.
+    ///
+    /// Polling is the deliberate v1 design. There is no push, no websocket, and
+    /// no daemon change: this reads task messages like `task list` does and
+    /// reports staleness locally. Exit 0 means nothing stale, exit 1 means at
+    /// least one stale task was reported.
+    Watch {
+        /// Flag tasks unclaimed longer than this duration, e.g. `30s`, `10m`, `1h`.
+        /// `0s`/`1ms` flag every open unclaimed task (useful for scripted checks).
+        #[arg(long)]
+        unclaimed_longer_than: Option<String>,
+        /// Flag tasks claimed longer than this duration with no `done` event.
+        #[arg(long)]
+        claimed_without_progress: Option<String>,
+        /// Optional channel to inspect; default is all readable channels.
+        #[arg(long)]
+        channel: Option<String>,
     },
 
     /// Show every channel you can see, with its newest messages.
@@ -230,6 +252,44 @@ enum Command {
     /// Check the local keryx installation and report problems.
     Doctor,
 
+    /// Substring search over message bodies across readable channels.
+    Search {
+        /// Case-insensitive substring to look for in message bodies.
+        query: String,
+        /// Only search this channel. Defaults to every readable channel.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Maximum matches to show. `0` shows all matches.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+
+    /// Show messages around a cursor in a channel.
+    Thread {
+        /// Channel to read.
+        channel: String,
+        /// Cursor of the anchor message.
+        cursor: i64,
+        /// Messages before the anchor to show.
+        #[arg(long, default_value_t = 5)]
+        before: u32,
+        /// Messages after the anchor to show.
+        #[arg(long, default_value_t = 5)]
+        after: u32,
+    },
+
+    /// Alias for `thread` with a symmetric window: `--radius N` means
+    /// `--before N --after N`.
+    Around {
+        /// Channel to read.
+        channel: String,
+        /// Cursor of the anchor message.
+        cursor: i64,
+        /// Messages on each side of the anchor to show.
+        #[arg(long, default_value_t = 5)]
+        radius: u32,
+    },
+
     /// Print the identity this process is acting as.
     Whoami,
 
@@ -255,10 +315,46 @@ enum Command {
         /// Print only the public key.
         #[arg(long)]
         pubkey_only: bool,
+        /// Show the pubkey/fingerprint that WOULD be registered without writing a file.
+        #[arg(long)]
+        dry_run: bool,
+        /// Replace an existing key. Prints the old pubkey/fingerprint as a
+        /// rotation warning, removes the old file, then creates via the atomic
+        /// link path. Without this, an existing key is an error.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Read-only operator report: identities, roles, channel ACLs and limits.
+    Admin {
+        /// Defaults to `report`: the local config matrix plus key-match status.
+        #[command(subcommand)]
+        command: Option<AdminCommand>,
     },
 
     /// Run a command as a given identity.
     Run(RunArgs),
+}
+
+/// Read-only operator subcommands. Nothing here mutates the board, the
+/// config, or the keystore, and nothing prints key material.
+#[derive(Debug, Subcommand)]
+enum AdminCommand {
+    /// Show the local operator report: identities, roles, channel ACL matrix
+    /// (including `allow_external`), limits, and key-match status.
+    /// Runs outside a wrapper; it reads the config, not the board.
+    Report,
+    /// Show recent messages across readable channels (newest first).
+    /// Runs inside a wrapper; it reuses the inbox/read path, so it enforces
+    /// the same ACLs as any other read.
+    Recent {
+        /// Maximum messages to show.
+        #[arg(long, default_value_t = 10)]
+        limit: u32,
+        /// Only messages from this channel.
+        #[arg(long)]
+        channel: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -287,6 +383,10 @@ enum TaskCommand {
     Claim {
         channel: String,
         task_id: String,
+        /// Lease duration after which the claim expires (e.g. 10m, 1h).
+        /// Stored in the claim message body only; expired claims read as unclaimed.
+        #[arg(long)]
+        lease: Option<String>,
     },
     /// Mark an existing task as done.
     Done {
@@ -401,8 +501,8 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Command::Read { channel, since, since_last, save_cursor, limit } => {
             cmd_read(json, &channel, since, since_last, save_cursor, limit)
         }
-        Command::Subscribe { channel, interval_ms, since, since_last, save_cursor, for_, exit_on, exit_on_json, count } => {
-            cmd_subscribe(json, &channel, interval_ms, since, since_last, save_cursor, for_.as_deref(), exit_on.as_deref(), exit_on_json.as_deref(), count)
+        Command::Subscribe { channel, interval_ms, since, since_last, save_cursor, for_, exit_on, exit_on_json, exit_on_task, count } => {
+            cmd_subscribe(json, &channel, interval_ms, since, since_last, save_cursor, for_.as_deref(), exit_on.as_deref(), exit_on_json.as_deref(), exit_on_task.as_deref(), count)
         }
         Command::Dm { identity, body, body_file, provenance } => {
             let channel = format!("dm/{identity}");
@@ -441,6 +541,9 @@ fn dispatch(cli: Cli) -> Result<i32> {
             cmd_post(json, &channel, &body, Provenance::SelfOriginated)
         }
         Command::Cursor { channel, clear, set } => cmd_cursor(json, &channel, clear, set),
+        Command::Watch { unclaimed_longer_than, claimed_without_progress, channel } => {
+            cmd_watch(json, unclaimed_longer_than.as_deref(), claimed_without_progress.as_deref(), channel.as_deref())
+        }
         Command::React { channel, cursor, reaction } => {
             if cursor <= 0 {
                 return Err(idboard_core::error::CoreError::bad_request("reaction cursor must be positive"));
@@ -459,11 +562,21 @@ fn dispatch(cli: Cli) -> Result<i32> {
             cmd_peers(json, since.as_deref(), watch, watch_interval_ms)
         }
         Command::Doctor => cmd_doctor(json),
+        Command::Admin { command } => cmd_admin(json, command),
+        Command::Search { query, channel, limit } => {
+            cmd_search(json, &query, channel.as_deref(), limit)
+        }
+        Command::Thread { channel, cursor, before, after } => {
+            cmd_thread(json, &channel, cursor, before, after)
+        }
+        Command::Around { channel, cursor, radius } => {
+            cmd_thread(json, &channel, cursor, radius, radius)
+        }
         Command::Mcp => idboard::mcp::run_stdio(),
         Command::Instructions { harness, identity } => {
             cmd_instructions(json, harness, identity.as_deref())
         }
-        Command::Keygen { identity, pubkey_only } => cmd_keygen(&identity, pubkey_only),
+        Command::Keygen { identity, pubkey_only, dry_run, force } => cmd_keygen(&identity, pubkey_only, dry_run, force),
         Command::Run(args) => cmd_run(args),
     }
 }
@@ -673,6 +786,7 @@ fn cmd_subscribe(
     for_: Option<&str>,
     exit_on: Option<&str>,
     exit_on_json: Option<&str>,
+    exit_on_task: Option<&str>,
     count: Option<u64>,
 ) -> Result<i32> {
     validate_channel(channel)?;
@@ -733,6 +847,18 @@ fn cmd_subscribe(
                     store.flush()?;
                 }
                 return Ok(0);
+            }
+            if let Some(task_id) = exit_on_task {
+                if !task_id.is_empty()
+                    && let Some(ev) = parse_task_event(&m.envelope.body)
+                    && ev.kind == "done"
+                    && ev.id == task_id
+                {
+                    if let Some(mut store) = store {
+                        store.flush()?;
+                    }
+                    return Ok(0);
+                }
             }
             if let Some(limit) = count {
                 if seen >= limit {
@@ -817,6 +943,11 @@ You are running as the keryx identity `{name}`.
 - `keryx mention <identity> \"<message>\"` posts `mention:<identity>:...` for agents to detect.
 - `keryx notify <identity> \"<message>\"` is a concise alias for a direct-message post.
 - `keryx task` shows the open task list; `task next` picks the next unclaimed task.
+- `keryx task claim <channel> <id> [--lease 10m]` claims a task, optionally with
+  a lease (`--lease` accepts `ms`/`s`/`m`/`h`/`d`, e.g. `10m`, `1h`). The lease
+  is stored in the claim message body (`lease_ms` + `claimed_at_ms`); when it
+  expires the task reads as unclaimed again in `list`/`next`/`focus`/console.
+  Omit `--lease` for a claim that lasts until released or done.
 - `keryx task complete <channel> <id> --body <text>` posts a report and marks done.
 - `keryx task reopen <channel> <id>` returns a stuck task to the unclaimed pool.
 - `keryx task abandon <channel> <id>` releases your claim without marking done.
@@ -830,6 +961,7 @@ You are running as the keryx identity `{name}`.
 - `keryx console --brief` prints a one-line status suitable for heartbeat prompts.
 - `keryx web` serves that same read-only board view on loopback; the URL carries an ephemeral token.
 - `keryx focus` is the start-of-task summary: identity, claimed tasks, next task and recent messages.
+  Its text output prints the `keryx task claim <channel> <id>` command for the next task.
 - `keryx replay <channel> [--since-last] [--save-cursor] [--limit N]` reconstructs a readable backlog.
 - `keryx next` is a shortcut for `keryx task next`.
 - `keryx task create <channel> \"<title>\"` / `claim` / `done` / `list` coordinate
@@ -1008,6 +1140,152 @@ fn parse_duration_ms(input: &str) -> Result<u64> {
     value.checked_mul(unit_ms).ok_or_else(|| idboard_core::error::CoreError::bad_request(format!("duration {input:?} is too large")))
 }
 
+/// Parse a watch threshold. Same units as [`parse_duration_ms`], but zero is
+/// allowed: `0s` flags every matching task, which is what makes scripted
+/// checks deterministic without sleeps.
+fn parse_watch_duration_ms(input: &str) -> Result<u64> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err(idboard_core::error::CoreError::bad_request("duration must not be empty"));
+    }
+    let (number, unit_ms) = if let Some(n) = s.strip_suffix("ms") {
+        (n, 1)
+    } else if let Some(n) = s.strip_suffix('s') {
+        (n, 1_000)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 60_000)
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n, 3_600_000)
+    } else if let Some(n) = s.strip_suffix('d') {
+        (n, 86_400_000)
+    } else {
+        (s, 1_000)
+    };
+    let value: u64 = number.trim().parse().map_err(|_| {
+        idboard_core::error::CoreError::bad_request(format!("invalid duration {input:?}; use e.g. 30s, 10m, 2h or 1d"))
+    })?;
+    value.checked_mul(unit_ms).ok_or_else(|| idboard_core::error::CoreError::bad_request(format!("duration {input:?} is too large")))
+}
+
+/// Milliseconds since `event_ms`, saturating at zero for future timestamps.
+fn watch_age_ms(event_ms: i64, now_ms: i64) -> u64 {
+    now_ms.saturating_sub(event_ms).max(0) as u64
+}
+
+/// Pure staleness predicate: an open, unclaimed task is stale once its age
+/// reaches the threshold.
+fn is_unclaimed_stale(created_at_ms: i64, done: bool, claimed: bool, now_ms: i64, threshold_ms: u64) -> bool {
+    !done && !claimed && watch_age_ms(created_at_ms, now_ms) >= threshold_ms
+}
+
+/// Pure stall predicate: a claimed, unfinished task is stalled once the time
+/// since its latest claim reaches the threshold.
+fn is_claim_stalled(claimed_at_ms: Option<i64>, claimed: bool, done: bool, now_ms: i64, threshold_ms: u64) -> bool {
+    match (claimed, done, claimed_at_ms) {
+        (true, false, Some(at)) => watch_age_ms(at, now_ms) >= threshold_ms,
+        _ => false,
+    }
+}
+
+/// One stale entry: the task plus why it was flagged and how old it is.
+struct StaleAlert<'a> {
+    record: &'a TaskRecord,
+    reason: &'static str,
+    age_ms: u64,
+}
+
+/// Select stale tasks from already-loaded records. Pure in `now_ms`, so unit
+/// tests never touch the clock or the board.
+fn select_stale_tasks(
+    records: &[TaskRecord],
+    now_ms: i64,
+    unclaimed_threshold_ms: Option<u64>,
+    claimed_threshold_ms: Option<u64>,
+) -> Vec<StaleAlert<'_>> {
+    let mut out = Vec::new();
+    for record in records {
+        let claimed = record.view.claimed_by.is_some();
+        if let Some(threshold) = unclaimed_threshold_ms
+            && is_unclaimed_stale(record.created_at_ms, record.view.done, claimed, now_ms, threshold)
+        {
+            out.push(StaleAlert {
+                record,
+                reason: "unclaimed",
+                age_ms: watch_age_ms(record.created_at_ms, now_ms),
+            });
+            continue;
+        }
+        if let Some(threshold) = claimed_threshold_ms
+            && is_claim_stalled(record.claimed_at_ms, claimed, record.view.done, now_ms, threshold)
+        {
+            out.push(StaleAlert {
+                // `claimed_at_ms` is `Some` whenever `is_claim_stalled` is true.
+                record,
+                reason: "claimed-without-progress",
+                age_ms: watch_age_ms(record.claimed_at_ms.unwrap_or(now_ms), now_ms),
+            });
+        }
+    }
+    out
+}
+
+fn stale_alert_json(alert: &StaleAlert<'_>) -> serde_json::Value {
+    serde_json::json!({
+        "channel": alert.record.channel,
+        "id": alert.record.view.id,
+        "title": alert.record.view.title,
+        "age_ms": alert.age_ms,
+        "reason": alert.reason,
+        "claimed_by": alert.record.view.claimed_by,
+    })
+}
+
+/// Single-evaluation watch: read task state like `task list` does and report
+/// staleness locally. No push, no new socket, no daemon change.
+fn cmd_watch(
+    json: bool,
+    unclaimed_longer_than: Option<&str>,
+    claimed_without_progress: Option<&str>,
+    channel: Option<&str>,
+) -> Result<i32> {
+    if unclaimed_longer_than.is_none() && claimed_without_progress.is_none() {
+        return Err(idboard_core::error::CoreError::bad_request(
+            "pass --unclaimed-longer-than and/or --claimed-without-progress, e.g. --unclaimed-longer-than 30m",
+        ));
+    }
+    let unclaimed_threshold = unclaimed_longer_than.map(parse_watch_duration_ms).transpose()?;
+    let claimed_threshold = claimed_without_progress.map(parse_watch_duration_ms).transpose()?;
+    if let Some(name) = channel {
+        validate_channel(name)?;
+    }
+
+    let client = RelayClient::from_env()?;
+    let channels = match channel {
+        Some(name) => vec![name.to_string()],
+        None => visible_readable_channels(&client)?,
+    };
+    let (_, records) = load_tasks(&client, &channels)?;
+    let now_ms = idboard_core::now_ms();
+    let stale = select_stale_tasks(&records, now_ms, unclaimed_threshold, claimed_threshold);
+
+    if json {
+        let entries: Vec<serde_json::Value> = stale.iter().map(stale_alert_json).collect();
+        println!("{}", serde_json::json!({ "stale": entries, "now_ms": now_ms }));
+        return Ok(i32::from(!stale.is_empty()));
+    }
+    if stale.is_empty() {
+        eprintln!("no stale tasks");
+        return Ok(0);
+    }
+    for alert in &stale {
+        println!(
+            "stale[{}] {} {} {} age_ms={}",
+            alert.reason, alert.record.channel, alert.record.view.id, alert.record.view.title, alert.age_ms
+        );
+    }
+    Ok(1)
+}
+
 /// Render "when did we last hear from this identity" without a clock dependency.
 fn last_seen_label(now_ms: i64, last_seen_ms: i64) -> String {
     if last_seen_ms <= 0 {
@@ -1090,13 +1368,28 @@ struct TaskRecord {
     channel: String,
     view: TaskView,
     create_cursor: i64,
+    /// Envelope timestamp of the `create` event, for poll-based staleness.
+    created_at_ms: i64,
+    /// Envelope timestamp of the latest `claim`/`reclaim`, cleared on
+    /// `abandon`/`reopen`. `None` when unclaimed.
+    claimed_at_ms: Option<i64>,
 }
 
 fn collect_tasks_from_messages(
     messages: Vec<idboard_core::wire::StoredMessage>,
     channel: &str,
 ) -> Vec<TaskRecord> {
-    let mut tasks: std::collections::BTreeMap<String, (TaskView, i64)> = std::collections::BTreeMap::new();
+    collect_tasks_from_messages_at(messages, channel, idboard_core::now_ms())
+}
+
+fn collect_tasks_from_messages_at(
+    messages: Vec<idboard_core::wire::StoredMessage>,
+    channel: &str,
+    now_ms: i64,
+) -> Vec<TaskRecord> {
+    // (view, create_cursor, created_at_ms, claimed_at_ms)
+    let mut tasks: std::collections::BTreeMap<String, (TaskView, i64, i64, Option<i64>)> =
+        std::collections::BTreeMap::new();
     for message in messages {
         let Some(ev) = parse_task_event(&message.envelope.body) else { continue };
         match ev.kind.as_str() {
@@ -1107,27 +1400,50 @@ fn collect_tasks_from_messages(
                     created_by: message.envelope.sender_id.clone(),
                     claimed_by: None,
                     done: false,
+                    lease_ms: None,
+                    lease_expires_at_ms: None,
                 };
-                tasks.insert(ev.id.clone(), (view, message.cursor));
+                tasks.insert(ev.id.clone(), (view, message.cursor, message.envelope.timestamp, None));
             }
             "claim" | "reclaim" => {
-                if let Some((task, _)) = tasks.get_mut(&ev.id) {
+                if let Some((task, _, _, claimed_at)) = tasks.get_mut(&ev.id) {
                     task.claimed_by = Some(message.envelope.sender_id);
+                    // Staleness uses the authoritative envelope timestamp, not the
+                    // claimer's self-reported `claimed_at_ms` (used for leases).
+                    *claimed_at = Some(message.envelope.timestamp);
+                    match ev.lease_ms {
+                        Some(lease) => {
+                            let claimed_at_ev = ev.claimed_at_ms.unwrap_or(message.envelope.timestamp);
+                            let expires = claimed_at_ev.saturating_add(lease as i64);
+                            task.lease_ms = Some(lease);
+                            task.lease_expires_at_ms = Some(expires);
+                        }
+                        None => {
+                            task.lease_ms = None;
+                            task.lease_expires_at_ms = None;
+                        }
+                    }
                 }
             }
             "abandon" => {
-                if let Some((task, _)) = tasks.get_mut(&ev.id) {
+                if let Some((task, _, _, claimed_at)) = tasks.get_mut(&ev.id) {
                     task.claimed_by = None;
+                    task.lease_ms = None;
+                    task.lease_expires_at_ms = None;
+                    *claimed_at = None;
                 }
             }
             "reopen" => {
-                if let Some((task, _)) = tasks.get_mut(&ev.id) {
+                if let Some((task, _, _, claimed_at)) = tasks.get_mut(&ev.id) {
                     task.done = false;
                     task.claimed_by = None;
+                    task.lease_ms = None;
+                    task.lease_expires_at_ms = None;
+                    *claimed_at = None;
                 }
             }
             "done" => {
-                if let Some((task, _)) = tasks.get_mut(&ev.id) {
+                if let Some((task, _, _, _)) = tasks.get_mut(&ev.id) {
                     task.done = true;
                 }
             }
@@ -1135,9 +1451,20 @@ fn collect_tasks_from_messages(
         }
     }
 
+    // Leases expire at read time: an expired claim reads as unclaimed.
+    // No daemon/store change; the claim message stays on the board.
+    for (task, _, _, claimed_at) in tasks.values_mut() {
+        if let Some(expires) = task.lease_expires_at_ms {
+            if !task.done && task.claimed_by.is_some() && now_ms >= expires {
+                task.claimed_by = None;
+                *claimed_at = None;
+            }
+        }
+    }
+
     let mut records: Vec<_> = tasks
         .into_values()
-        .map(|(view, create_cursor)| TaskRecord { channel: channel.to_string(), view, create_cursor })
+        .map(|(view, create_cursor, created_at_ms, claimed_at_ms)| TaskRecord { channel: channel.to_string(), view, create_cursor, created_at_ms, claimed_at_ms })
         .collect();
     records.sort_by_key(|record| record.create_cursor);
     records
@@ -1176,6 +1503,8 @@ fn task_json(task: &'_ TaskRecord) -> serde_json::Value {
         "created_by": task.view.created_by,
         "claimed_by": task.view.claimed_by,
         "done": task.view.done,
+        "lease_ms": task.view.lease_ms,
+        "lease_expires_at_ms": task.view.lease_expires_at_ms,
     })
 }
 
@@ -1191,6 +1520,12 @@ struct TaskEvent {
     kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    /// Lease duration in ms. Only set on `claim`; absent means no expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_ms: Option<u64>,
+    /// Wall-clock time the claim was made. Compared against `now_ms` at read time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claimed_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1200,6 +1535,12 @@ struct TaskView {
     created_by: String,
     claimed_by: Option<String>,
     done: bool,
+    /// Lease duration in ms from the last claim, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_ms: Option<u64>,
+    /// Absolute expiry of the last claim, if leased.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_expires_at_ms: Option<i64>,
 }
 
 fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
@@ -1253,10 +1594,15 @@ fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
             }
             Ok(0)
         }
-        TaskCommand::Claim { channel, task_id } => {
+        TaskCommand::Claim { channel, task_id, lease } => {
             validate_channel(&channel)?;
-            let body = serde_json::json!({ "v": 1, "id": task_id, "kind": "claim" });
-            cmd_post(json, &channel, &format!("task:{}", body), Provenance::SelfOriginated)
+            let lease_ms = lease.as_deref().map(parse_duration_ms).transpose()?;
+            let mut event = serde_json::json!({ "v": 1, "id": task_id, "kind": "claim" });
+            if let Some(lease_ms) = lease_ms {
+                event["lease_ms"] = serde_json::json!(lease_ms);
+                event["claimed_at_ms"] = serde_json::json!(idboard_core::now_ms());
+            }
+            cmd_post(json, &channel, &format!("task:{}", event), Provenance::SelfOriginated)
         }
         TaskCommand::Done { channel, task_id } => {
             validate_channel(&channel)?;
@@ -1385,6 +1731,16 @@ fn parse_task_event(body: &str) -> Option<TaskEvent> {
 
 /// Collect the same checks `doctor` relies on so console and future diagnostics
 /// share one implementation.
+/// Pure permission predicate for key files, unit-testable on any platform.
+///
+/// `mode` is the low 9 permission bits (e.g. `metadata.permissions().mode() &
+/// 0o777` on Unix). Returns `true` when no group/other permission bit is set,
+/// i.e. the file is owner-only like `0600`.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn key_mode_is_private(mode: u32) -> bool {
+    mode & 0o077 == 0
+}
+
 fn collect_doctor_checks() -> Vec<serde_json::Value> {
     let mut checks = Vec::new();
     let home = layout::idboard_home();
@@ -1457,6 +1813,7 @@ fn collect_doctor_checks() -> Vec<serde_json::Value> {
             };
             checks.push(serde_json::json!({ "name": format!("key:{}", identity.name), "ok": ok, "detail": detail }));
         }
+        checks.push(key_permissions_check(&config));
     }
 
     let socket = layout::daemon_socket();
@@ -1480,6 +1837,54 @@ fn collect_doctor_checks() -> Vec<serde_json::Value> {
     }
 
     checks
+}
+
+/// The `key-permissions` doctor check.
+///
+/// On Unix, warns (ok = false) when any registered identity's key file carries
+/// group/other permission bits. On Windows, reports the inherited-DACL note
+/// without claiming enforcement: NTFS inherits from the state root, and keryx
+/// sets no descriptor.
+fn key_permissions_check(config: &idboard_acl::Config) -> serde_json::Value {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut loose: Vec<String> = Vec::new();
+        let mut checked: usize = 0;
+        for identity in config.identities() {
+            let key_path = layout::key_path(&identity.name);
+            let Ok(md) = std::fs::metadata(&key_path) else {
+                continue;
+            };
+            checked += 1;
+            let mode = md.permissions().mode() & 0o777;
+            if !key_mode_is_private(mode) {
+                loose.push(format!("{} ({:o})", identity.name, mode));
+            }
+        }
+        if loose.is_empty() {
+            serde_json::json!({
+                "name": "key-permissions",
+                "ok": true,
+                "detail": format!("{checked} key file(s) are owner-only (0600)"),
+            })
+        } else {
+            serde_json::json!({
+                "name": "key-permissions",
+                "ok": false,
+                "detail": format!("group/other-readable key files: {}", loose.join(", ")),
+            })
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = config;
+        serde_json::json!({
+            "name": "key-permissions",
+            "ok": true,
+            "detail": "Windows: key files inherit ACLs from the state root; not enforced by keryx. Verify with: scripts\\check-custody.ps1",
+        })
+    }
 }
 
 fn summarize_doctor_checks(checks: &[serde_json::Value]) -> (Vec<serde_json::Value>, bool) {
@@ -1516,10 +1921,279 @@ fn cmd_doctor(json: bool) -> Result<i32> {
     Ok(if ok { 0 } else { 1 })
 }
 
+fn cmd_admin(json: bool, command: Option<AdminCommand>) -> Result<i32> {
+    match command.unwrap_or(AdminCommand::Report) {
+        AdminCommand::Report => cmd_admin_report(json),
+        AdminCommand::Recent { limit, channel } => cmd_admin_recent(json, limit, channel.as_deref()),
+    }
+}
+
+/// Key-match status for one configured identity: does the keystore hold a key,
+/// and does it match the configured pubkey. The seed itself is never read
+/// into a printable form — only the derived pubkey is compared.
+fn admin_key_status(config: &idboard_acl::Config) -> Vec<serde_json::Value> {
+    config
+        .identities()
+        .map(|id| {
+            let key_path = layout::key_path(&id.name);
+            let (present, matches) = match std::fs::read(&key_path) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut seed = [0u8; 32];
+                    seed.copy_from_slice(&bytes);
+                    match idboard_core::keys::LocalSigner::from_seed(&seed, &id.name) {
+                        Ok(signer) => (true, signer.public_hex() == id.pubkey_hex),
+                        Err(_) => (true, false),
+                    }
+                }
+                _ => (false, false),
+            };
+            serde_json::json!({
+                "identity": id.name,
+                "key_present": present,
+                "key_matches_config": matches,
+            })
+        })
+        .collect()
+}
+
+/// The stable admin report shape. Pure over the loaded config plus key-match
+/// facts so a unit test can pin the layout: identities with roles, the
+/// channel ACL matrix including `allow_external`, limits, and key-match
+/// status. No seeds, no private material.
+fn admin_report_value(
+    config: &idboard_acl::Config,
+    key_status: &[serde_json::Value],
+) -> serde_json::Value {
+    let identities: Vec<_> = config
+        .identities()
+        .map(|id| {
+            let status = key_status.iter().find(|s| s["identity"] == id.name);
+            serde_json::json!({
+                "identity": id.name,
+                "role": id.role,
+                "fingerprint": id.fingerprint,
+                "pubkey": id.pubkey_hex,
+                "key_present": status.and_then(|s| s["key_present"].as_bool()).unwrap_or(false),
+                "key_matches_config": status.and_then(|s| s["key_matches_config"].as_bool()).unwrap_or(false),
+            })
+        })
+        .collect();
+    let channels: Vec<_> = config
+        .channels()
+        .map(|c| {
+            serde_json::json!({
+                "channel": c.name,
+                "post": c.post,
+                "read": c.read,
+                "allow_external": c.allow_external,
+            })
+        })
+        .collect();
+    let limits = config.limits();
+    serde_json::json!({
+        "ok": true,
+        "report_version": 1,
+        "identities": identities,
+        "channels": channels,
+        "limits": {
+            "posts_per_window": limits.posts_per_window,
+            "window_ms": limits.window_ms,
+            "unlimited": limits.is_unlimited(),
+        },
+        "role_warnings": config.role_inheritance_warnings(),
+        "key_status": key_status,
+    })
+}
+
+fn cmd_admin_report(json: bool) -> Result<i32> {
+    let path = layout::config_path();
+    let config = idboard_acl::Config::load(&path).map_err(|e| {
+        idboard_core::error::CoreError::internal(format!(
+            "cannot load config at {}: {e}",
+            path.display()
+        ))
+    })?;
+    let key_status = admin_key_status(&config);
+    let report = admin_report_value(&config, &key_status);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("keryx admin report: {} identities, {} channels", config.identity_count(), report["channels"].as_array().map(|c| c.len()).unwrap_or(0));
+        for id in report["identities"].as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
+            let key = match (id["key_present"].as_bool(), id["key_matches_config"].as_bool()) {
+                (Some(true), Some(true)) => "key=match",
+                (Some(true), _) => "key=MISMATCH",
+                _ => "key=missing",
+            };
+            println!(
+                "  {:<16} role={:<12} fp={} {key}",
+                id["identity"].as_str().unwrap_or("?"),
+                id["role"].as_str().unwrap_or("?"),
+                id["fingerprint"].as_str().unwrap_or("?")
+            );
+        }
+        for c in report["channels"].as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
+            println!(
+                "  {:<20} post=[{}] read=[{}] allow_external={}",
+                c["channel"].as_str().unwrap_or("?"),
+                c["post"].as_array().map(|g| g.iter().filter_map(|g| g.as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default(),
+                c["read"].as_array().map(|g| g.iter().filter_map(|g| g.as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default(),
+                c["allow_external"].as_bool().unwrap_or(true)
+            );
+        }
+        let limits = &report["limits"];
+        if limits["unlimited"].as_bool().unwrap_or(true) {
+            println!("  limits: none");
+        } else {
+            println!(
+                "  limits: {} posts per identity per {}s",
+                limits["posts_per_window"].as_u64().unwrap_or(0),
+                limits["window_ms"].as_u64().unwrap_or(0) / 1000
+            );
+        }
+        for w in report["role_warnings"].as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
+            println!("  warning: {}", w.as_str().unwrap_or(""));
+        }
+    }
+    Ok(0)
+}
+
+/// First cursor to read from when the caller wants the newest `limit`
+/// messages ending at `cursor`. Pure so the windowing is testable: a caller
+/// that clamps or wraps here would re-scan history or miss the tail.
+fn recent_window_start(cursor: i64, limit: u32) -> i64 {
+    cursor.saturating_sub(limit as i64).max(0)
+}
+
+fn cmd_admin_recent(json: bool, limit: u32, channel: Option<&str>) -> Result<i32> {
+    if let Some(channel) = channel {
+        validate_channel(channel)?;
+    }
+    let client = RelayClient::from_env()?;
+    // `inbox` reports the newest page per channel plus each channel's cursor,
+    // all under the same authorisation a real read uses. A filtered view is a
+    // local projection of that digest, not a second permission model.
+    let inbox = client.inbox(limit.max(1))?;
+    let mut digests = inbox.channels;
+    if let Some(channel) = channel {
+        digests.retain(|digest| digest.channel == channel);
+        let Some(digest) = digests.pop() else {
+            return Err(idboard_core::error::CoreError::new(
+                idboard_core::ErrorCode::UnknownChannel,
+                format!("no visible channel {channel:?}; see `keryx inbox --limit 0` for what this identity may see"),
+            ));
+        };
+        if !digest.can_read {
+            return Err(idboard_core::error::CoreError::new(
+                idboard_core::ErrorCode::Unauthorized,
+                format!("this identity may not read {channel:?}"),
+            ));
+        }
+        // Reuse the read path for the payload so the bytes come from the same
+        // authorised, bounded page a `read` would return.
+        let start = recent_window_start(digest.cursor, limit.max(1));
+        let res = client.read(channel, start, limit.max(1))?;
+        if json {
+            println!("{}", serde_json::json!({
+                "ok": true,
+                "channel": channel,
+                "cursor": res.cursor,
+                "messages": res.messages,
+            }));
+        } else if res.messages.is_empty() {
+            eprintln!("no messages in {channel}");
+        } else {
+            for m in &res.messages {
+                println!("{}", render_message(&m.envelope.sender_id, m.cursor, &m.envelope.provenance, &m.envelope.body));
+            }
+            eprintln!("-- cursor {} --", res.cursor.unwrap_or(start));
+        }
+        return Ok(0);
+    }
+    let mut recent: Vec<(i64, serde_json::Value)> = Vec::new();
+    for digest in &digests {
+        if !digest.can_read {
+            continue;
+        }
+        for m in &digest.messages {
+            recent.push((
+                m.cursor,
+                serde_json::json!({
+                    "channel": digest.channel,
+                    "cursor": m.cursor,
+                    "sender": m.envelope.sender_id,
+                    "body": m.envelope.body,
+                }),
+            ));
+        }
+    }
+    recent.sort_by(|a, b| b.0.cmp(&a.0));
+    let recent: Vec<_> = recent.into_iter().take(limit as usize).map(|(_, v)| v).collect();
+    if json {
+        println!("{}", serde_json::json!({ "ok": true, "messages": recent }));
+    } else if recent.is_empty() {
+        eprintln!("no recent messages");
+    } else {
+        for m in &recent {
+            println!(
+                "[{} cursor {}] {}",
+                m["channel"].as_str().unwrap_or("?"),
+                m["cursor"].as_i64().unwrap_or(0),
+                render_message(
+                    m["sender"].as_str().unwrap_or("?"),
+                    m["cursor"].as_i64().unwrap_or(0),
+                    &Provenance::SelfOriginated,
+                    m["body"].as_str().unwrap_or(""),
+                )
+            );
+        }
+    }
+    Ok(0)
+}
+
+/// The stable console report shape: `{ok, report_version: 1, checks,
+/// problems, board}`. Kept as a pure constructor so a unit test can pin the
+/// field layout without a relay or a daemon.
+fn console_report_json(
+    ok: bool,
+    checks: &[serde_json::Value],
+    problems: &[serde_json::Value],
+    board: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ok": ok,
+        "report_version": 1,
+        "checks": checks,
+        "problems": problems,
+        "board": board,
+    })
+}
+
+/// One-line heartbeat rendering of a console report. Pure for the same reason:
+/// `--brief` and `--watch` combine in the same loop, so the line a supervisor
+/// greps must not depend on how often it is re-printed.
+fn brief_line(ok: bool, board: &serde_json::Value) -> String {
+    if !board["available"].as_bool().unwrap_or(false) {
+        return format!("STATE={} board=unavailable", if ok { "ok" } else { "attention" });
+    }
+    format!(
+        "STATE={} board=ok identity={} channels={} tasks_open={} tasks_claimed={} tasks_done={} last_age={}",
+        if ok { "ok" } else { "attention" },
+        board["identity"].as_str().unwrap_or("unknown"),
+        board["channels"].as_array().map(|c| c.len()).unwrap_or(0),
+        board["tasks"]["open"].as_u64().unwrap_or(0),
+        board["tasks"]["claimed"].as_u64().unwrap_or(0),
+        board["tasks"]["done"].as_u64().unwrap_or(0),
+        board["last_message_age"].as_str().unwrap_or("never")
+    )
+}
+
 /// Read-only aggregate for humans and agents.
 ///
 /// Local checks always run. Board-visible state is included only inside a
 /// wrapper, because board reads require the wrapper's signing path.
+/// `--brief` collapses each refresh to one heartbeat-sized line and composes
+/// with `--watch`, which re-prints until interrupted.
 fn cmd_console(json: bool, limit: u32, brief: bool, watch: bool, watch_interval_ms: u64) -> Result<i32> {
     let interval = Duration::from_millis(watch_interval_ms.max(10));
 
@@ -1530,30 +2204,9 @@ fn cmd_console(json: bool, limit: u32, brief: bool, watch: bool, watch_interval_
         let ok = local_ok;
 
         if json {
-            println!("{}", serde_json::json!({
-                "ok": ok,
-                "report_version": 1,
-                "checks": checks,
-                "problems": problems,
-                "board": board,
-            }));
+            println!("{}", console_report_json(ok, &checks, &problems, &board));
         } else if brief {
-            let board_tasks = board.get("tasks").cloned().unwrap_or(serde_json::json!({}));
-            let identity = board["identity"].as_str().unwrap_or("unknown");
-            if board["available"].as_bool().unwrap_or(false) {
-                println!(
-                    "STATE={} board=ok identity={} channels={} tasks_open={} tasks_claimed={} tasks_done={} last_age={}",
-                    if ok { "ok" } else { "attention" },
-                    identity,
-                    board["channels"].as_array().map(|c| c.len()).unwrap_or(0),
-                    board_tasks["open"].as_u64().unwrap_or(0),
-                    board_tasks["claimed"].as_u64().unwrap_or(0),
-                    board_tasks["done"].as_u64().unwrap_or(0),
-                    board["last_message_age"].as_str().unwrap_or("never")
-                );
-            } else {
-                println!("STATE={} board=unavailable", if ok { "ok" } else { "attention" });
-            }
+            println!("{}", brief_line(ok, &board));
         } else {
             println!("keryx console: {}", if ok { "ok" } else { "attention" });
             println!("local:");
@@ -1663,7 +2316,10 @@ fn cmd_focus(json: bool, limit: u32) -> Result<i32> {
     println!("channels: {}", board["channels"].as_array().map(|c| c.len()).unwrap_or(0));
     println!("your claimed tasks: {my_claimed}");
     match next {
-        Some(record) => println!("next: {} {} ({})", record.channel, record.view.id, record.view.title),
+        Some(record) => {
+            println!("next: {} {} ({})", record.channel, record.view.id, record.view.title);
+            println!("claim: keryx task claim {} {}", record.channel, record.view.id);
+        }
         None => println!("next: no unclaimed tasks"),
     }
     println!("recent messages:");
@@ -1688,6 +2344,15 @@ struct ReplayChannel {
     start: i64,
     final_cursor: i64,
     messages: Vec<idboard_core::wire::StoredMessage>,
+}
+
+/// Keep only the newest `per_channel` messages. `0` means no truncation.
+/// Split out so the per-channel replay bound is unit-testable.
+fn truncate_to_last<T>(mut messages: Vec<T>, per_channel: usize) -> Vec<T> {
+    if per_channel > 0 && messages.len() > per_channel {
+        messages = messages.into_iter().rev().take(per_channel).collect::<Vec<_>>().into_iter().rev().collect();
+    }
+    messages
 }
 
 fn cmd_replay(
@@ -1739,10 +2404,7 @@ fn cmd_replay(
             0
         };
         let res = client.read(&channel, start, 1000)?;
-        let mut messages: Vec<_> = res.messages.into_iter().collect();
-        if per_channel > 0 && messages.len() > per_channel {
-            messages = messages.into_iter().rev().take(per_channel).collect::<Vec<_>>().into_iter().rev().collect();
-        }
+        let messages: Vec<_> = truncate_to_last(res.messages.into_iter().collect(), per_channel);
         let final_cursor = messages.last().map(|message| message.cursor).unwrap_or(start);
         if let Some(store) = store.as_mut() {
             if save_cursor {
@@ -1791,16 +2453,226 @@ fn cmd_replay(
     Ok(0)
 }
 
+/// A single search hit: which channel and message matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchHit {
+    channel: String,
+    cursor: i64,
+    sender: String,
+    body: String,
+}
+
+/// Case-insensitive substring match over a message body.
+///
+/// An empty query matches nothing: it is rejected before any read happens, and
+/// this predicate keeps that property if it is ever reused elsewhere.
+fn message_matches_query(body: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return false;
+    }
+    body.to_lowercase().contains(&query.to_lowercase())
+}
+
+/// Collect case-insensitive substring hits from already-read messages.
+///
+/// Messages are expected oldest-first, as `read` returns them; hits keep that
+/// order. `limit == 0` means no cap.
+fn collect_search_hits(
+    channel: &str,
+    messages: &[idboard_core::wire::StoredMessage],
+    query: &str,
+    limit: usize,
+) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    for m in messages {
+        if message_matches_query(&m.envelope.body, query) {
+            hits.push(SearchHit {
+                channel: channel.to_string(),
+                cursor: m.cursor,
+                sender: m.envelope.sender_id.clone(),
+                body: m.envelope.body.clone(),
+            });
+            if limit > 0 && hits.len() >= limit {
+                break;
+            }
+        }
+    }
+    hits
+}
+
+/// Window of messages around an anchor cursor.
+///
+/// Messages are expected oldest-first by cursor. The anchor is the message
+/// with `cursor == target`; when no message has exactly that cursor (a cursor
+/// from another channel, or past the end), the window centres on the first
+/// message after the target instead. `before`/`after` are message counts, not
+/// cursor distances, so gaps in cursor numbering do not widen the window.
+fn thread_window(
+    messages: &[idboard_core::wire::StoredMessage],
+    target: i64,
+    before: usize,
+    after: usize,
+) -> &[idboard_core::wire::StoredMessage] {
+    let anchor = messages
+        .iter()
+        .position(|m| m.cursor == target)
+        .or_else(|| messages.iter().position(|m| m.cursor > target))
+        .unwrap_or(messages.len().saturating_sub(1).min(messages.len()));
+    if messages.is_empty() {
+        return &[];
+    }
+    let start = anchor.saturating_sub(before);
+    let end = (anchor + 1 + after).min(messages.len());
+    &messages[start..end]
+}
+
+/// Substring search over message bodies via the existing read API.
+///
+/// Channels are small on a local bus, so each readable channel is read from
+/// the start (`read(channel, 0, 1000)`, the daemon's maximum read) and
+/// filtered client-side. No daemon change: this is a convenience over `read`.
+fn cmd_search(json: bool, query: &str, channel: Option<&str>, limit: u32) -> Result<i32> {
+    if query.is_empty() {
+        return Err(idboard_core::error::CoreError::bad_request(
+            "search query must not be empty",
+        ));
+    }
+    if let Some(channel) = channel {
+        validate_channel(channel)?;
+    }
+    let client = RelayClient::from_env()?;
+    let channels = match channel {
+        Some(channel) => vec![channel.to_string()],
+        None => visible_readable_channels(&client)?,
+    };
+    let cap = if limit == 0 { 0 } else { limit as usize };
+    let mut hits = Vec::new();
+    for channel in &channels {
+        let res = client.read(channel, 0, 1000)?;
+        let mut channel_hits = collect_search_hits(channel, &res.messages, query, 0);
+        if cap > 0 {
+            let remaining = cap.saturating_sub(hits.len());
+            if remaining == 0 {
+                break;
+            }
+            channel_hits.truncate(remaining);
+        }
+        hits.extend(channel_hits);
+        if cap > 0 && hits.len() >= cap {
+            break;
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "query": query,
+                "matches": hits.iter().map(|h| serde_json::json!({
+                    "channel": h.channel,
+                    "cursor": h.cursor,
+                    "sender": h.sender,
+                    "body": h.body,
+                })).collect::<Vec<_>>(),
+            })
+        );
+        return Ok(0);
+    }
+    if hits.is_empty() {
+        eprintln!("no messages matching {query:?}");
+        return Ok(0);
+    }
+    for hit in &hits {
+        println!(
+            "[{} #{}] {}",
+            hit.channel,
+            hit.cursor,
+            render_message(&hit.sender, hit.cursor, &Provenance::SelfOriginated, &hit.body)
+        );
+    }
+    Ok(0)
+}
+
+/// Show the messages around an anchor cursor via the existing read API.
+///
+/// The channel is read from the start (`read(channel, 0, 1000)`, the daemon's
+/// maximum read) and sliced client-side into a `before`/`after` window. `around`
+/// calls this with `before == after == radius`. No daemon change.
+fn cmd_thread(json: bool, channel: &str, cursor: i64, before: u32, after: u32) -> Result<i32> {
+    validate_channel(channel)?;
+    if cursor <= 0 {
+        return Err(idboard_core::error::CoreError::bad_request(
+            "thread cursor must be positive",
+        ));
+    }
+    let client = RelayClient::from_env()?;
+    let res = client.read(channel, 0, 1000)?;
+    let window = thread_window(&res.messages, cursor, before as usize, after as usize);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "channel": channel,
+                "cursor": cursor,
+                "before": before,
+                "after": after,
+                "messages": window,
+            })
+        );
+        return Ok(0);
+    }
+    if window.is_empty() {
+        eprintln!("no messages in {channel} around cursor {cursor}");
+        return Ok(0);
+    }
+    for m in window {
+        let marker = if m.cursor == cursor { ">" } else { " " };
+        println!(
+            "{marker} {}",
+            render_message(&m.envelope.sender_id, m.cursor, &m.envelope.provenance, &m.envelope.body)
+        );
+    }
+    Ok(0)
+}
+
+/// The board shape when it cannot be reached. Every key the available shape
+/// carries is present with an empty value, so `--json` consumers can rely on
+/// the field layout regardless of whether this process is inside a wrapper.
+fn unavailable_board(why: Option<String>) -> serde_json::Value {
+    let mut board = serde_json::json!({
+        "available": false,
+        "identity": serde_json::Value::Null,
+        "channels": [],
+        "tasks": {
+            "open": 0,
+            "claimed": 0,
+            "done": 0,
+            "claimed_by": {},
+            "oldest_unclaimed": serde_json::Value::Null,
+        },
+        "last_message_age_ms": serde_json::Value::Null,
+        "last_message_age": serde_json::Value::Null,
+        "recent": [],
+    });
+    if let Some(why) = why {
+        board["why"] = serde_json::Value::String(why);
+    }
+    board
+}
+
 fn board_summary(limit: u32) -> serde_json::Value {
     let Ok(client) = RelayClient::from_env() else {
-        return serde_json::json!({ "available": false });
+        return unavailable_board(None);
     };
     let Ok(identity) = client.whoami().map(|id| id.identity) else {
-        return serde_json::json!({ "available": false });
+        return unavailable_board(None);
     };
     let inbox = match client.inbox(limit) {
         Ok(res) => res,
-        Err(e) => return serde_json::json!({ "available": false, "why": e.detail }),
+        Err(e) => return unavailable_board(Some(e.detail)),
     };
     let channels = inbox.channels;
     let mut task_open = 0;
@@ -2058,6 +2930,7 @@ footer { padding: 18px 28px 28px; color: var(--muted); font-size: 12px; border-t
     <div class="panel ok" id="board-panel">
       <h2>Board</h2>
       <div class="statusline"><span id="board-status" class="badge">loading…</span><span id="board-identity" class="muted mono"></span></div>
+      <div class="muted mono" id="board-age" style="margin-top:8px">last message: …</div>
       <div class="metrics">
         <div class="metric"><strong id="channels">…</strong><span>channels</span></div>
         <div class="metric"><strong id="tasks-open">…</strong><span>open</span></div>
@@ -2112,6 +2985,9 @@ async function refresh() {
   document.getElementById('board-panel').className = `panel ${available ? 'ok' : 'bad'}`;
   setText('board-status', available ? 'board online (inside wrapper)' : 'board unavailable: run inside `keryx run`');
   setText('board-identity', board.identity || '');
+  setText('board-age', available
+    ? `last message: ${board.last_message_age || 'never'}${board.last_message_age_ms != null ? ` (${board.last_message_age_ms} ms ago)` : ''}`
+    : 'board unavailable: run inside `keryx run`');
   setText('channels', (board.channels || []).length);
   setText('tasks-open', board.tasks?.open ?? '—');
   setText('tasks-claimed', board.tasks?.claimed ?? '—');
@@ -2158,20 +3034,67 @@ fn cmd_whoami(json: bool) -> Result<i32> {
     Ok(0)
 }
 
-fn cmd_keygen(identity: &str, pubkey_only: bool) -> Result<i32> {
+fn cmd_keygen(identity: &str, pubkey_only: bool, dry_run: bool, force: bool) -> Result<i32> {
     validate_identity(identity)?;
+    if dry_run && force {
+        return Err(idboard_core::error::CoreError::bad_request(
+            "pass either --dry-run or --force, not both",
+        ));
+    }
 
-    // Refuse to clobber an existing key. Overwriting would silently change the
-    // identity's key while the config still names the old one, and the symptom
-    // is a daemon that rejects everything with `bad_signature`.
-    let keystore = Keystore::standard();
-    if let Some(existing) = keystore.load_seed(identity)? {
-        let signer = idboard_core::keys::LocalSigner::from_seed(&existing, identity)?;
+    // Validate-only: generate in memory, report what WOULD be registered,
+    // write nothing.
+    if dry_run {
+        let (signer, _) = idboard_core::keys::LocalSigner::generate(identity)?;
         if pubkey_only {
             println!("{}", signer.public_hex());
         } else {
-            eprintln!("a key for {identity:?} already exists; not changing it.");
-            print_key(&signer, identity, false);
+            print_key_dry_run(&signer, identity);
+        }
+        return Ok(0);
+    }
+
+    // Refuse to clobber an existing key unless --force was given. Overwriting
+    // would silently change the identity's key while the config still names the
+    // old one, and the symptom is a daemon that rejects everything with
+    // `bad_signature`.
+    let keystore = Keystore::standard();
+    if let Some(existing) = keystore.load_seed(identity)? {
+        if !force {
+            if pubkey_only {
+                let signer = idboard_core::keys::LocalSigner::from_seed(&existing, identity)?;
+                println!("{}", signer.public_hex());
+                return Ok(0);
+            }
+            return Err(idboard::keystore::KeystoreError::AlreadyExists {
+                identity: identity.to_string(),
+                path: keystore.key_path(identity).display().to_string(),
+            }
+            .into());
+        }
+        // --force: rotation. Load the old public key first so the operator sees
+        // what is being replaced, warn loudly, then remove-then-create so the
+        // new seed still goes through the atomic link path in `save_seed`
+        // (never rename-overwrite).
+        let old_signer = idboard_core::keys::LocalSigner::from_seed(&existing, identity)?;
+        eprintln!(
+            "rotating key for {identity:?}: old pubkey {} fingerprint {} will stop verifying; \
+             update the config pubkey and restart the daemon after this.",
+            old_signer.public_hex(),
+            old_signer.fingerprint()
+        );
+        std::fs::remove_file(keystore.key_path(identity)).map_err(|source| {
+            idboard_core::error::CoreError::internal(format!(
+                "failed to remove old key for rotation at {}: {source}",
+                keystore.key_path(identity).display()
+            ))
+        })?;
+        let (signer, seed) = idboard_core::keys::LocalSigner::generate(identity)?;
+        keystore.save_seed(identity, &seed)?;
+        if pubkey_only {
+            println!("{}", signer.public_hex());
+        } else {
+            print_key_rotated(&signer, identity, &old_signer);
         }
         return Ok(0);
     }
@@ -2184,6 +3107,40 @@ fn cmd_keygen(identity: &str, pubkey_only: bool) -> Result<i32> {
         print_key(&signer, identity, true);
     }
     Ok(0)
+}
+
+fn print_key_dry_run(signer: &idboard_core::keys::LocalSigner, identity: &str) {
+    println!("Dry run: no key file was written.");
+    println!();
+    println!("If registered, this would be the config entry in {}:", layout::config_path().display());
+    println!();
+    println!("[identity.{identity}]");
+    println!("role = \"{identity}\"");
+    println!("pubkey = \"{}\"", signer.public_hex());
+    println!();
+    println!("fingerprint: {}", signer.fingerprint());
+    println!("(no key file written; run without --dry-run to create one)");
+}
+
+fn print_key_rotated(
+    signer: &idboard_core::keys::LocalSigner,
+    identity: &str,
+    old: &idboard_core::keys::LocalSigner,
+) {
+    println!("Rotated the key for {identity:?}.");
+    println!("old pubkey: {}", old.public_hex());
+    println!("old fingerprint: {}", old.fingerprint());
+    println!();
+    println!("Add this to {}:", layout::config_path().display());
+    println!();
+    println!("[identity.{identity}]");
+    println!("role = \"{identity}\"");
+    println!("pubkey = \"{}\"", signer.public_hex());
+    println!();
+    println!("fingerprint: {}", signer.fingerprint());
+    println!("key file:    {}", layout::key_path(identity).display());
+    println!();
+    println!("Then restart the daemon so it picks the new key up; posts signed with the old key will now fail.");
 }
 
 fn print_key(signer: &idboard_core::keys::LocalSigner, identity: &str, created: bool) {
@@ -2288,6 +3245,116 @@ mod tests {
         assert_eq!(head.0, 200);
         assert_eq!(web_bind_is_loopback("127.0.0.1:0"), true);
         assert_eq!(web_bind_is_loopback("0.0.0.0:0"), false);
+    }
+
+    #[test]
+    fn console_brief_and_watch_compose_and_json_shape_is_stable() {
+        // `--brief --watch` must parse: the heartbeat loop re-prints the brief
+        // line until interrupted, and `--json --watch` re-prints the report.
+        let cli = Cli::try_parse_from(["keryx", "console", "--brief", "--watch"]).unwrap();
+        match cli.command {
+            Command::Console { brief, watch, .. } => assert!(brief && watch),
+            other => panic!("unexpected {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["keryx", "admin", "recent", "--channel", "general", "--limit", "5"]).unwrap();
+        match cli.command {
+            Command::Admin { command } => match command.expect("recent subcommand") {
+                AdminCommand::Recent { limit, channel } => {
+                    assert_eq!(limit, 5);
+                    assert_eq!(channel.as_deref(), Some("general"));
+                }
+                other => panic!("unexpected admin {other:?}"),
+            },
+            other => panic!("unexpected {other:?}"),
+        }
+        // A bare `admin` defaults to `report`.
+        let cli = Cli::try_parse_from(["keryx", "admin"]).unwrap();
+        assert!(matches!(cli.command, Command::Admin { command: None }));
+
+        // The JSON report shape pins every field an agent branches on.
+        let board = serde_json::json!({
+            "available": true,
+            "identity": "eng-01",
+            "channels": [{"channel": "general", "can_read": true, "can_post": true, "cursor": 2, "messages": 1}],
+            "tasks": {"open": 1, "claimed": 2, "done": 3, "claimed_by": {"eng-01": 2}, "oldest_unclaimed": {"id": "t-1", "title": "x", "channel": "general", "created_by": "eng-01", "claimed_by": serde_json::Value::Null, "done": false}},
+            "last_message_age_ms": 5000,
+            "last_message_age": "seen 5s ago",
+            "recent": [],
+        });
+        let report = console_report_json(true, &[], &[], &board);
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["report_version"], 1);
+        assert!(report["board"]["available"].as_bool().unwrap());
+        assert_eq!(report["board"]["tasks"]["claimed_by"]["eng-01"], 2);
+        assert_eq!(report["board"]["last_message_age_ms"], 5000);
+        assert!(report["board"]["recent"].as_array().is_some());
+
+        // The unavailable board keeps the same keys with empty values.
+        let down = unavailable_board(None);
+        assert_eq!(down["available"], false);
+        for key in ["identity", "channels", "tasks", "last_message_age", "last_message_age_ms", "recent"] {
+            assert!(down.get(key).is_some(), "unavailable board must still carry {key}");
+        }
+        assert_eq!(down["tasks"]["claimed_by"], serde_json::json!({}));
+        assert!(down["recent"].as_array().unwrap().is_empty());
+
+        // The brief line is what supervisors grep; both directions are pinned.
+        let line = brief_line(true, &board);
+        assert!(line.contains("STATE=ok"), "{line}");
+        assert!(line.contains("tasks_open=1"), "{line}");
+        assert!(line.contains("last_age="), "{line}");
+        let line = brief_line(false, &down);
+        assert_eq!(line, "STATE=attention board=unavailable");
+    }
+
+    #[test]
+    fn recent_window_start_never_rewinds_or_wraps() {
+        assert_eq!(recent_window_start(100, 10), 90);
+        assert_eq!(recent_window_start(5, 10), 0);
+        assert_eq!(recent_window_start(0, 10), 0);
+    }
+
+    #[test]
+    fn admin_report_shape_carries_acls_and_never_key_material() {
+        let k1 = idboard_core::keys::LocalSigner::generate("a").unwrap().0.public_hex();
+        let k2 = idboard_core::keys::LocalSigner::generate("b").unwrap().0.public_hex();
+        let config = idboard_acl::Config::from_toml(&format!(
+            "[identity.a]\nrole = \"eng\"\npubkey = \"{k1}\"\n\
+             [identity.b]\nrole = \"lead\"\npubkey = \"{k2}\"\n\
+             [channel.general]\npost = [\"*\"]\nread = [\"*\"]\n\
+             [channel.strict]\npost = [\"lead\"]\nread = [\"*\"]\nallow_external = false\n"
+        ))
+        .unwrap();
+        let key_status = vec![
+            serde_json::json!({"identity": "a", "key_present": true, "key_matches_config": true}),
+            serde_json::json!({"identity": "b", "key_present": false, "key_matches_config": false}),
+        ];
+        let report = admin_report_value(&config, &key_status);
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["report_version"], 1);
+        let strict = report["channels"].as_array().unwrap().iter().find(|c| c["channel"] == "strict").unwrap();
+        assert_eq!(strict["allow_external"], false);
+        assert!(strict["post"].as_array().unwrap().iter().any(|g| g == "lead"));
+        let a = report["identities"].as_array().unwrap().iter().find(|i| i["identity"] == "a").unwrap();
+        assert_eq!(a["role"], "eng");
+        assert_eq!(a["key_matches_config"], true);
+        // Pubkeys and fingerprints are public; seeds must never appear.
+        let text = serde_json::to_string(&report).unwrap();
+        assert!(!text.contains("seed"), "{text}");
+        assert!(text.contains("pubkey"));
+    }
+
+    #[test]
+    fn web_dashboard_renders_claims_oldest_and_last_message_age() {
+        // The operator cards the track adds: claimed-by breakdown,
+        // oldest-unclaimed, and last-message age. The data already rides in
+        // `board_summary`; the page must actually render it.
+        for needle in ["tasks-by-identity", "tasks-summary", "board-age", "last message:"] {
+            assert!(WEB_HTML.contains(needle), "dashboard is missing {needle}");
+        }
+        let html = response_for_request("GET /t/ HTTP/1.1\r\n\r\n", "t", 5);
+        let body = String::from_utf8(html.2).unwrap();
+        assert!(body.contains("board-age"), "{body}");
     }
 
     #[test]
@@ -2540,5 +3607,364 @@ mod tests {
         assert_eq!(parse_duration_ms("42").unwrap(), 42_000);
         assert!(parse_duration_ms("0").is_err());
         assert!(parse_duration_ms("soon").is_err());
+    }
+
+    fn test_message(cursor: i64, body: &str) -> idboard_core::wire::StoredMessage {
+        idboard_core::wire::StoredMessage {
+            cursor,
+            envelope: idboard_core::envelope::Envelope {
+                op: idboard_core::envelope::Op::Post,
+                sender_id: "eng-01".to_string(),
+                sender_pubkey_fp: "fp".to_string(),
+                channel: "general".to_string(),
+                body: body.to_string(),
+                provenance: Provenance::SelfOriginated,
+                seq: cursor,
+                timestamp: 1_758_900_000_000,
+                nonce: String::new(),
+                signature: "sig".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn search_matching_is_case_insensitive_substring() {
+        assert!(message_matches_query("Deploy is DONE", "done"));
+        assert!(message_matches_query("deploy done", "DEPLOY"));
+        assert!(message_matches_query("a needle in hay", "Needle In"));
+        assert!(!message_matches_query("nothing here", "missing"));
+        assert!(!message_matches_query("anything", ""));
+        assert!(!message_matches_query("", "query"));
+    }
+
+    #[test]
+    fn search_hits_keep_read_order_and_honour_the_cap() {
+        let messages = vec![
+            test_message(1, "first deploy note"),
+            test_message(2, "unrelated"),
+            test_message(3, "second DEPLOY note"),
+            test_message(4, "third deploy note"),
+        ];
+        let hits = collect_search_hits("general", &messages, "deploy", 0);
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].cursor, 1);
+        assert_eq!(hits[1].cursor, 3);
+        assert_eq!(hits[2].cursor, 4);
+        assert!(hits.iter().all(|h| h.channel == "general"));
+
+        let capped = collect_search_hits("general", &messages, "deploy", 2);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[1].cursor, 3);
+    }
+
+    #[test]
+    fn thread_window_centres_on_the_anchor() {
+        let messages: Vec<_> = (1..=7).map(|c| test_message(c, "m")).collect();
+        let window = thread_window(&messages, 4, 2, 2);
+        assert_eq!(window.iter().map(|m| m.cursor).collect::<Vec<_>>(), vec![2, 3, 4, 5, 6]);
+
+        // Edges clamp rather than wrap.
+        let head = thread_window(&messages, 1, 5, 2);
+        assert_eq!(head.iter().map(|m| m.cursor).collect::<Vec<_>>(), vec![1, 2, 3]);
+        let tail = thread_window(&messages, 7, 2, 5);
+        assert_eq!(tail.iter().map(|m| m.cursor).collect::<Vec<_>>(), vec![5, 6, 7]);
+    }
+
+    #[test]
+    fn thread_window_without_an_exact_anchor_centres_after_it() {
+        // Cursor gaps (e.g. filtered or compacted history) must not widen the
+        // window: counts are messages, not cursor distances.
+        let messages = vec![test_message(1, "a"), test_message(3, "b"), test_message(5, "c")];
+        let window = thread_window(&messages, 2, 1, 1);
+        assert_eq!(window.iter().map(|m| m.cursor).collect::<Vec<_>>(), vec![1, 3, 5]);
+        let empty: Vec<idboard_core::wire::StoredMessage> = Vec::new();
+        assert!(thread_window(&empty, 1, 5, 5).is_empty());
+    }
+
+    #[test]
+    fn search_thread_and_around_parse_from_the_cli() {
+        let cli = Cli::try_parse_from(["keryx", "search", "deploy"]).unwrap();
+        match cli.command {
+            Command::Search { query, channel, limit } => {
+                assert_eq!(query, "deploy");
+                assert_eq!(channel, None);
+                assert_eq!(limit, 50);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["keryx", "search", "x", "--channel", "general", "--limit", "0"]).unwrap();
+        match cli.command {
+            Command::Search { channel, limit, .. } => {
+                assert_eq!(channel.as_deref(), Some("general"));
+                assert_eq!(limit, 0);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["keryx", "thread", "general", "4"]).unwrap();
+        match cli.command {
+            Command::Thread { channel, cursor, before, after } => {
+                assert_eq!(channel, "general");
+                assert_eq!(cursor, 4);
+                assert_eq!((before, after), (5, 5));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["keryx", "around", "general", "4", "--radius", "2"]).unwrap();
+        match cli.command {
+            Command::Around { channel, cursor, radius } => {
+                assert_eq!(channel, "general");
+                assert_eq!(cursor, 4);
+                assert_eq!(radius, 2);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_mode_is_private_rejects_any_group_or_other_bit() {
+        assert!(key_mode_is_private(0o600), "owner-only must be private");
+        assert!(key_mode_is_private(0o400), "owner read-only must be private");
+        assert!(key_mode_is_private(0o700), "owner-only dir-style must be private");
+        assert!(!key_mode_is_private(0o640), "group-readable must not be private");
+        assert!(!key_mode_is_private(0o604), "other-readable must not be private");
+        assert!(!key_mode_is_private(0o644), "world-readable must not be private");
+        assert!(!key_mode_is_private(0o777), "wide-open must not be private");
+        assert!(!key_mode_is_private(0o620), "group-write must not be private");
+    }
+
+    #[test]
+    fn keygen_accepts_dry_run_and_force_flags() {
+        let cli = Cli::try_parse_from(["keryx", "keygen", "eng-01", "--dry-run"]).unwrap();
+        match cli.command {
+            Command::Keygen { identity, dry_run, force, .. } => {
+                assert_eq!(identity, "eng-01");
+                assert!(dry_run);
+                assert!(!force);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["keryx", "keygen", "eng-01", "--force"]).unwrap();
+        match cli.command {
+            Command::Keygen { force, dry_run, .. } => {
+                assert!(force);
+                assert!(!dry_run);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // Defaults stay off, preserving the refuse-to-overwrite behaviour.
+        let cli = Cli::try_parse_from(["keryx", "keygen", "eng-01"]).unwrap();
+        match cli.command {
+            Command::Keygen { dry_run, force, .. } => {
+                assert!(!dry_run);
+                assert!(!force);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_claim_accepts_an_optional_lease_duration() {
+        let cli = Cli::try_parse_from(["keryx", "task", "claim", "general", "t-1"]).unwrap();
+        match cli.command {
+            Command::Task { command: Some(TaskCommand::Claim { lease, .. }) } => assert_eq!(lease, None),
+            other => panic!("unexpected {other:?}"),
+        }
+        let cli =
+            Cli::try_parse_from(["keryx", "task", "claim", "general", "t-1", "--lease", "10m"]).unwrap();
+        match cli.command {
+            Command::Task { command: Some(TaskCommand::Claim { lease, .. }) } => {
+                assert_eq!(lease.as_deref(), Some("10m"));
+                assert_eq!(parse_duration_ms(lease.as_deref().unwrap()).unwrap(), 600_000);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expired_task_leases_read_as_unclaimed() {
+        let now = 1_758_900_000_000i64;
+        let create = test_message(1, r#"task:{"v":1,"id":"t-1","kind":"create","title":"leased"}"#);
+        let active_claim = format!(
+            r#"task:{{"v":1,"id":"t-1","kind":"claim","lease_ms":3600000,"claimed_at_ms":{}}}"#,
+            now - 60_000
+        );
+        let expired_claim = format!(
+            r#"task:{{"v":1,"id":"t-1","kind":"claim","lease_ms":3600000,"claimed_at_ms":{}}}"#,
+            now - 7_200_000
+        );
+        let active = collect_tasks_from_messages_at(
+            vec![create.clone(), test_message(2, &active_claim)],
+            "general",
+            now,
+        );
+        assert_eq!(active[0].view.claimed_by.as_deref(), Some("eng-01"));
+
+        let expired = collect_tasks_from_messages_at(
+            vec![create, test_message(2, &expired_claim)],
+            "general",
+            now,
+        );
+        assert_eq!(expired[0].view.claimed_by, None);
+        assert_eq!(expired[0].view.lease_ms, Some(3_600_000));
+    }
+
+    #[test]
+    fn unleased_task_claims_never_expire() {
+        let now = 1_758_900_000_000i64;
+        let create = test_message(1, r#"task:{"v":1,"id":"t-9","kind":"create","title":"plain"}"#);
+        let claim = test_message(2, r#"task:{"v":1,"id":"t-9","kind":"claim"}"#);
+        let records = collect_tasks_from_messages_at(vec![create, claim], "general", now + 86_400_000);
+        assert_eq!(records[0].view.claimed_by.as_deref(), Some("eng-01"));
+    }
+
+    #[test]
+    fn replay_truncation_keeps_the_newest_per_channel() {
+        let messages: Vec<i64> = (1..=5).collect();
+        assert_eq!(truncate_to_last(messages, 2), vec![4, 5]);
+        let messages: Vec<i64> = (1..=3).collect();
+        assert_eq!(truncate_to_last(messages, 50), vec![1, 2, 3]);
+        let messages: Vec<i64> = (1..=3).collect();
+        assert_eq!(truncate_to_last(messages, 0), vec![1, 2, 3]);
+    }
+
+    fn test_message_at(cursor: i64, timestamp: i64, body: &str) -> idboard_core::wire::StoredMessage {
+        let mut m = test_message(cursor, body);
+        m.envelope.timestamp = timestamp;
+        m
+    }
+
+    /// Staleness is a pure function of event timestamps vs now: no clock, no
+    /// board, no sleeps. The boundary is inclusive, so a zero threshold flags
+    /// everything and scripted checks stay deterministic.
+    #[test]
+    fn watch_staleness_predicates_are_pure_functions_of_now_vs_timestamps() {
+        let now = 1_758_900_000_000i64;
+        assert_eq!(watch_age_ms(now - 5_000, now), 5_000);
+        assert_eq!(watch_age_ms(now, now), 0);
+        assert_eq!(
+            watch_age_ms(now + 60_000, now),
+            0,
+            "a timestamp from the future is skew, not a negative age"
+        );
+
+        // Unclaimed: open and old enough is stale; done or claimed is not.
+        assert!(is_unclaimed_stale(now - 1_000, false, false, now, 1_000));
+        assert!(is_unclaimed_stale(now - 1_000, false, false, now, 0));
+        assert!(!is_unclaimed_stale(now - 999, false, false, now, 1_000));
+        assert!(!is_unclaimed_stale(now - 60_000, true, false, now, 0), "done tasks are never stale");
+        assert!(!is_unclaimed_stale(now - 60_000, false, true, now, 0), "claimed tasks are not unclaimed-stale");
+
+        // Claimed: stalled only when claimed, unfinished, and old enough.
+        assert!(is_claim_stalled(Some(now - 2_000), true, false, now, 1_000));
+        assert!(!is_claim_stalled(Some(now - 500), true, false, now, 1_000));
+        assert!(!is_claim_stalled(Some(now - 60_000), true, true, now, 0), "done tasks never stall");
+        assert!(!is_claim_stalled(Some(now - 60_000), false, false, now, 0), "unclaimed tasks never stall");
+        assert!(!is_claim_stalled(None, true, false, now, 0), "a claim without a timestamp never stalls");
+    }
+
+    #[test]
+    fn parse_watch_duration_ms_allows_zero_for_scripted_checks() {
+        assert_eq!(parse_watch_duration_ms("0s").unwrap(), 0);
+        assert_eq!(parse_watch_duration_ms("0").unwrap(), 0);
+        assert_eq!(parse_watch_duration_ms("1ms").unwrap(), 1);
+        assert_eq!(parse_watch_duration_ms("30s").unwrap(), 30_000);
+        assert_eq!(parse_watch_duration_ms("10m").unwrap(), 600_000);
+        assert!(parse_watch_duration_ms("").is_err());
+        assert!(parse_watch_duration_ms("soon").is_err());
+    }
+
+    /// Timestamps ride on the envelope: create sets `created_at_ms`, claim sets
+    /// `claimed_at_ms`, and abandon clears the claim timestamp so the task
+    /// returns to the unclaimed pool with its original age.
+    #[test]
+    fn task_records_carry_create_and_claim_timestamps() {
+        let now = 1_758_900_000_000i64;
+        let create = test_message_at(1, now - 10_000, r#"task:{"v":1,"id":"t-1","kind":"create","title":"old"}"#);
+        let claim = test_message_at(2, now - 5_000, r#"task:{"v":1,"id":"t-1","kind":"claim"}"#);
+        let records = collect_tasks_from_messages_at(vec![create, claim], "general", now);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].created_at_ms, now - 10_000);
+        assert_eq!(records[0].claimed_at_ms, Some(now - 5_000));
+
+        let create = test_message_at(1, now - 10_000, r#"task:{"v":1,"id":"t-1","kind":"create","title":"old"}"#);
+        let claim = test_message_at(2, now - 5_000, r#"task:{"v":1,"id":"t-1","kind":"claim"}"#);
+        let abandon = test_message_at(3, now - 1_000, r#"task:{"v":1,"id":"t-1","kind":"abandon"}"#);
+        let records = collect_tasks_from_messages_at(vec![create, claim, abandon], "general", now);
+        assert_eq!(records[0].view.claimed_by, None);
+        assert_eq!(records[0].claimed_at_ms, None);
+        assert_eq!(records[0].created_at_ms, now - 10_000);
+    }
+
+    /// Selection over loaded records: unclaimed-stale and claimed-stalled are
+    /// disjoint, done tasks never appear, and the reported age matches now.
+    #[test]
+    fn select_stale_tasks_flags_unclaimed_and_stalled_claims() {
+        let now = 1_758_900_000_000i64;
+        let messages = vec![
+            test_message_at(1, now - 60_000, r#"task:{"v":1,"id":"t-old","kind":"create","title":"old"}"#),
+            test_message_at(2, now - 100, r#"task:{"v":1,"id":"t-new","kind":"create","title":"new"}"#),
+            test_message_at(3, now - 60_000, r#"task:{"v":1,"id":"t-stuck","kind":"create","title":"stuck"}"#),
+            test_message_at(4, now - 30_000, r#"task:{"v":1,"id":"t-stuck","kind":"claim"}"#),
+            test_message_at(5, now - 60_000, r#"task:{"v":1,"id":"t-done","kind":"create","title":"done"}"#),
+            test_message_at(6, now - 50_000, r#"task:{"v":1,"id":"t-done","kind":"done"}"#),
+        ];
+        let records = collect_tasks_from_messages_at(messages, "general", now);
+        assert_eq!(records.len(), 4);
+
+        let stale = select_stale_tasks(&records, now, Some(1_000), Some(1_000));
+        let ids: Vec<&str> = stale.iter().map(|a| a.record.view.id.as_str()).collect();
+        assert!(ids.contains(&"t-old"), "open and old must be unclaimed-stale: {ids:?}");
+        assert!(ids.contains(&"t-stuck"), "claimed long ago with no done must stall: {ids:?}");
+        assert!(!ids.contains(&"t-new"), "fresh tasks must not be flagged: {ids:?}");
+        assert!(!ids.contains(&"t-done"), "done tasks must never be flagged: {ids:?}");
+
+        let old = stale.iter().find(|a| a.record.view.id == "t-old").unwrap();
+        assert_eq!(old.reason, "unclaimed");
+        assert_eq!(old.age_ms, 60_000);
+        let stuck = stale.iter().find(|a| a.record.view.id == "t-stuck").unwrap();
+        assert_eq!(stuck.reason, "claimed-without-progress");
+        assert_eq!(stuck.age_ms, 30_000);
+        let entry = stale_alert_json(stuck);
+        assert_eq!(entry["id"], "t-stuck");
+        assert_eq!(entry["channel"], "general");
+        assert_eq!(entry["age_ms"], 30_000);
+
+        // Zero unclaimed threshold flags every open unclaimed task, done still excluded.
+        let all = select_stale_tasks(&records, now, Some(0), None);
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn watch_and_exit_on_task_parse_from_the_cli() {
+        let cli = Cli::try_parse_from(["keryx", "watch", "--unclaimed-longer-than", "30s"]).unwrap();
+        match cli.command {
+            Command::Watch { unclaimed_longer_than, claimed_without_progress, channel } => {
+                assert_eq!(unclaimed_longer_than.as_deref(), Some("30s"));
+                assert_eq!(claimed_without_progress, None);
+                assert_eq!(channel, None);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "keryx", "watch", "--claimed-without-progress", "10m", "--channel", "general",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Watch { claimed_without_progress, channel, .. } => {
+                assert_eq!(claimed_without_progress.as_deref(), Some("10m"));
+                assert_eq!(channel.as_deref(), Some("general"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "keryx", "subscribe", "general", "--since", "0", "--exit-on-task", "t-abc",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Subscribe { exit_on_task, .. } => {
+                assert_eq!(exit_on_task.as_deref(), Some("t-abc"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

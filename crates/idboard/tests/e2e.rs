@@ -1759,6 +1759,101 @@ fn subscribe_exit_on_stops_after_a_matching_body() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("stop here"));
 }
 
+/// Poll-based watch alerts: a freshly created task is unclaimed-stale under a
+/// zero threshold with no sleeps, a claimed task stalls under a zero claim
+/// threshold, and `done` clears both. Exit 1 means stale, exit 0 means clean.
+#[test]
+fn watch_flags_stale_tasks_and_clears_them_on_done() {
+    let b = TestBoard::start();
+    let created = b.as_identity("eng-01", &["task", "create", "general", "stale candidate"]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let task_id = String::from_utf8_lossy(&created.stdout)
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id is printed in the confirmation")
+        .trim_end_matches(['\n', '"'])
+        .to_string();
+
+    // Zero threshold flags the fresh task deterministically: no sleeps.
+    let out = b.as_identity(
+        "eng-01",
+        &["watch", "--unclaimed-longer-than", "0s", "--channel", "general", "--json"],
+    );
+    assert_eq!(out.status.code(), Some(1), "stale tasks must exit 1: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("watch --json must print JSON");
+    let stale = v["stale"].as_array().expect("a stale array");
+    assert_eq!(stale.len(), 1, "{stale:?}");
+    assert_eq!(stale[0]["id"], task_id);
+    assert_eq!(stale[0]["channel"], "general");
+    assert_eq!(stale[0]["reason"], "unclaimed");
+    assert!(stale[0]["age_ms"].as_u64().is_some(), "{stale:?}");
+
+    // A far-future threshold is clean and exits 0.
+    let out = b.as_identity(
+        "eng-01",
+        &["watch", "--unclaimed-longer-than", "1d", "--channel", "general", "--json"],
+    );
+    assert_eq!(out.status.code(), Some(0), "nothing stale must exit 0: {out:?}");
+
+    // Claiming moves it from unclaimed-stale to claimed-stalled.
+    assert!(b.as_identity("eng-01", &["task", "claim", "general", &task_id]).status.success());
+    let out = b.as_identity(
+        "eng-01",
+        &["watch", "--claimed-without-progress", "0s", "--channel", "general", "--json"],
+    );
+    assert_eq!(out.status.code(), Some(1), "stalled claim must exit 1: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["stale"].as_array().unwrap().len(), 1);
+
+    // Done clears both alerts.
+    assert!(b.as_identity("eng-01", &["task", "done", "general", &task_id]).status.success());
+    let out = b.as_identity(
+        "eng-01",
+        &[
+            "watch",
+            "--unclaimed-longer-than",
+            "0s",
+            "--claimed-without-progress",
+            "0s",
+            "--channel",
+            "general",
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "a done task must never be stale: {out:?}");
+
+    // The text path reports the same finding without --json.
+    let second = b.as_identity("eng-01", &["task", "create", "general", "second stale"]);
+    assert!(second.status.success());
+    let out = b.as_identity("eng-01", &["watch", "--unclaimed-longer-than", "0s", "--channel", "general"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("stale[unclaimed]"), "{out:?}");
+}
+
+/// `subscribe --exit-on-task` stops once a `done` event for that id appears,
+/// reusing the task-event parser. History is pre-posted, so the run is bounded
+/// with no sleeps.
+#[test]
+fn subscribe_exit_on_task_stops_on_the_matching_done_event() {
+    let b = TestBoard::start();
+    let created = b.as_identity("eng-01", &["task", "create", "general", "watched task"]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let task_id = String::from_utf8_lossy(&created.stdout)
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id")
+        .trim_end_matches(['\n', '"'])
+        .to_string();
+    assert!(b.as_identity("eng-01", &["task", "done", "general", &task_id]).status.success());
+
+    let out = b.as_identity(
+        "eng-01",
+        &["subscribe", "general", "--since", "0", "--exit-on-task", &task_id],
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains(&task_id), "{out:?}");
+}
+
 
 #[test]
 fn post_body_file_is_read_as_the_message_body() {
@@ -1883,6 +1978,434 @@ fn web_once_serves_the_landing_page_over_loopback() {
     assert!(response.contains("HTTP/1.0 200 OK"), "{response}");
     assert!(response.contains("Keryx console"), "{response}");
     assert!(!response.contains("POST"), "{response}");
+
+    let status = child.wait().expect("keryx web --once exits after one request");
+    assert!(status.success(), "{status:?}");
+}
+
+// --- Message plane: search / thread / around (CLI conveniences over read) ---
+
+/// Post several known bodies and return the `read --json` messages for them.
+fn message_plane_seed(b: &TestBoard, channel: &str, bodies: &[&str]) -> Vec<serde_json::Value> {
+    for body in bodies {
+        let out = b.post("eng-01", channel, body);
+        assert_eq!(out.status.code(), Some(0), "post {body:?} failed: {out:?}");
+    }
+    messages_of(&b.read("eng-01", channel, "0"))
+}
+
+fn search_matches(out: &Output) -> Vec<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!("search stdout is not JSON ({e})\nstdout: {}", String::from_utf8_lossy(&out.stdout))
+    });
+    assert_eq!(v["ok"], true, "search failed: {v}");
+    v["matches"].as_array().cloned().unwrap_or_else(|| panic!("search has no matches array: {v}"))
+}
+
+#[test]
+fn message_plane_search_finds_matching_bodies_case_insensitively() {
+    let b = TestBoard::start();
+    message_plane_seed(
+        &b,
+        "general",
+        &["the deploy is ready", "unrelated chatter", "DEPLOY approved by lead", "lunch plans"],
+    );
+
+    let out = b.as_identity("eng-01", &["search", "deploy", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "search failed: {out:?}");
+    let matches = search_matches(&out);
+    let bodies: Vec<&str> = matches.iter().filter_map(|m| m["body"].as_str()).collect();
+    assert_eq!(bodies, ["the deploy is ready", "DEPLOY approved by lead"]);
+
+    // Hits carry the channel, cursor and sender a reader needs to follow up.
+    assert!(matches.iter().all(|m| m["channel"] == "general"), "{matches:?}");
+    assert!(matches.iter().all(|m| m["sender"] == "eng-01"), "{matches:?}");
+    let cursors: Vec<i64> = matches.iter().filter_map(|m| m["cursor"].as_i64()).collect();
+    assert_eq!(cursors, [1, 3], "{matches:?}");
+}
+
+#[test]
+fn message_plane_search_respects_channel_and_limit() {
+    let b = TestBoard::start();
+    message_plane_seed(&b, "general", &["deploy one", "deploy two", "deploy three"]);
+
+    // A channel the query does not appear in yields no matches, not an error.
+    let out = b.as_identity("eng-01", &["search", "deploy", "--channel", "deploy-approvals", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "search failed: {out:?}");
+    assert!(search_matches(&out).is_empty());
+
+    // An explicit channel still finds its own messages.
+    let out = b.as_identity("eng-01", &["search", "deploy", "--channel", "general", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "search failed: {out:?}");
+    assert_eq!(search_matches(&out).len(), 3);
+
+    // The limit caps the total across channels.
+    let out = b.as_identity("eng-01", &["search", "deploy", "--limit", "2", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "search failed: {out:?}");
+    assert_eq!(search_matches(&out).len(), 2);
+}
+
+#[test]
+fn message_plane_search_text_output_names_channel_and_cursor() {
+    let b = TestBoard::start();
+    message_plane_seed(&b, "general", &["needle in the haystack"]);
+    let out = b.as_identity("eng-01", &["search", "needle"]);
+    assert_eq!(out.status.code(), Some(0), "search failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("general"), "{stdout}");
+    assert!(stdout.contains("#1"), "{stdout}");
+    assert!(stdout.contains("needle in the haystack"), "{stdout}");
+
+    let out = b.as_identity("eng-01", &["search", "nothing matches this"]);
+    assert_eq!(out.status.code(), Some(0), "an empty result is not an error: {out:?}");
+}
+
+#[test]
+fn message_plane_thread_shows_messages_around_a_cursor() {
+    let b = TestBoard::start();
+    let seeded = message_plane_seed(
+        &b,
+        "general",
+        &["msg-one", "msg-two", "msg-three", "msg-four", "msg-five"],
+    );
+    let anchor = seeded
+        .iter()
+        .find(|m| m["body"] == "msg-three")
+        .and_then(|m| m["cursor"].as_i64())
+        .expect("seeded msg-three");
+    assert_eq!(anchor, 3);
+
+    let out = b.as_identity(
+        "eng-01",
+        &["thread", "general", "3", "--before", "1", "--after", "1", "--json"],
+    );
+    assert_eq!(out.status.code(), Some(0), "thread failed: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("thread JSON");
+    let cursors: Vec<i64> =
+        v["messages"].as_array().expect("messages array").iter().filter_map(|m| m["cursor"].as_i64()).collect();
+    assert_eq!(cursors, [2, 3, 4], "{v}");
+    let bodies: Vec<&str> = v["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(bodies, ["msg-two", "msg-three", "msg-four"]);
+
+    // Edges clamp: asking for more history than exists just starts at the first.
+    let out = b.as_identity(
+        "eng-01",
+        &["thread", "general", "1", "--before", "5", "--after", "1", "--json"],
+    );
+    assert_eq!(out.status.code(), Some(0), "thread failed: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("thread JSON");
+    let cursors: Vec<i64> =
+        v["messages"].as_array().unwrap().iter().filter_map(|m| m["cursor"].as_i64()).collect();
+    assert_eq!(cursors, [1, 2], "{v}");
+}
+
+#[test]
+fn message_plane_around_matches_a_symmetric_thread() {
+    let b = TestBoard::start();
+    message_plane_seed(&b, "general", &["a-one", "a-two", "a-three", "a-four", "a-five"]);
+
+    let thread = b.as_identity("eng-01", &["thread", "general", "3", "--before", "2", "--after", "2", "--json"]);
+    let around = b.as_identity("eng-01", &["around", "general", "3", "--radius", "2", "--json"]);
+    assert_eq!(thread.status.code(), Some(0), "thread failed: {thread:?}");
+    assert_eq!(around.status.code(), Some(0), "around failed: {around:?}");
+    let thread_v: serde_json::Value = serde_json::from_slice(&thread.stdout).expect("thread JSON");
+    let around_v: serde_json::Value = serde_json::from_slice(&around.stdout).expect("around JSON");
+    assert_eq!(thread_v["messages"], around_v["messages"]);
+    let cursors: Vec<i64> =
+        around_v["messages"].as_array().unwrap().iter().filter_map(|m| m["cursor"].as_i64()).collect();
+    assert_eq!(cursors, [1, 2, 3, 4, 5]);
+
+    // The text form marks the anchor so a reader can orient.
+    let text = b.as_identity("eng-01", &["around", "general", "3", "--radius", "1"]);
+    assert_eq!(text.status.code(), Some(0), "around failed: {text:?}");
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains("> #3"), "anchor should be marked: {stdout}");
+}
+
+fn extract_task_id(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id in confirmation")
+        .trim_end_matches(['\n', '"'])
+        .to_string()
+}
+
+#[test]
+fn task_claim_lease_is_stored_in_the_message_body() {
+    let b = TestBoard::start();
+    let created = b.as_identity("eng-01", &["task", "create", "general", "leased work"]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let task_id = extract_task_id(&created);
+
+    let claimed = b.as_identity("eng-01", &["task", "claim", "general", &task_id, "--lease", "10m"]);
+    assert!(claimed.status.success(), "{}", String::from_utf8_lossy(&claimed.stderr));
+
+    let read = b.read("eng-01", "general", "0");
+    let bodies: Vec<String> =
+        messages_of(&read).iter().filter_map(|m| m.get("body").and_then(|v| v.as_str()).map(str::to_string)).collect();
+    let claim_body = bodies.iter().find(|body| body.contains(&task_id) && body.contains("\"claim\"")).expect("claim message on the board");
+    let inner: serde_json::Value = serde_json::from_str(claim_body.strip_prefix("task:").expect("task prefix")).expect("claim body is JSON");
+    assert_eq!(inner["lease_ms"], 600_000, "{inner}");
+    assert!(inner["claimed_at_ms"].as_i64().is_some_and(|t| t > 0), "{inner}");
+}
+
+#[test]
+fn task_claim_lease_expiry_returns_the_task_to_the_pool() {
+    let b = TestBoard::start();
+    // Crafted bodies give deterministic expiry without sleeping: one lease is
+    // already expired, one is still live. Both stay plain signed messages.
+    let created = b.as_identity("eng-01", &["task", "create", "general", "crafted expiry"]);
+    let task_id = extract_task_id(&created);
+    let now = idboard_core::now_ms();
+    let expired = format!(
+        "task:{{\"v\":1,\"id\":\"{task_id}\",\"kind\":\"claim\",\"lease_ms\":1000,\"claimed_at_ms\":{}}}",
+        now - 60_000
+    );
+    b.post("eng-01", "general", &expired);
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("list JSON");
+    let t = v["tasks"].as_array().unwrap().iter().find(|t| t["id"] == task_id).expect("task listed");
+    assert!(t["claimed_by"].is_null(), "expired lease must read as unclaimed: {t}");
+
+    let created = b.as_identity("eng-01", &["task", "create", "general", "live lease"]);
+    let live_id = extract_task_id(&created);
+    let live = format!(
+        "task:{{\"v\":1,\"id\":\"{live_id}\",\"kind\":\"claim\",\"lease_ms\":3600000,\"claimed_at_ms\":{now}}}"
+    );
+    b.post("eng-02", "general", &live);
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("list JSON");
+    let t = v["tasks"].as_array().unwrap().iter().find(|t| t["id"] == live_id).expect("live task listed");
+    assert_eq!(t["claimed_by"], "eng-02", "{t}");
+
+    // The real `--lease` path: claim with a sub-second lease, see it held, then
+    // see it released after it lapses. One short sleep, bounded under 2s.
+    let created = b.as_identity("eng-01", &["task", "create", "general", "short lease"]);
+    let short_id = extract_task_id(&created);
+    let claimed = b.as_identity("eng-01", &["task", "claim", "general", &short_id, "--lease", "900ms"]);
+    assert!(claimed.status.success(), "{}", String::from_utf8_lossy(&claimed.stderr));
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("list JSON");
+    let t = v["tasks"].as_array().unwrap().iter().find(|t| t["id"] == short_id).expect("short task listed");
+    assert_eq!(t["claimed_by"], "eng-01", "fresh lease must still be held: {t}");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("list JSON");
+    let t = v["tasks"].as_array().unwrap().iter().find(|t| t["id"] == short_id).expect("short task listed");
+    assert!(t["claimed_by"].is_null(), "lapsed lease must read as unclaimed: {t}");
+    let next = b.as_identity("eng-01", &["task", "next", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&next.stdout).expect("next JSON");
+    assert!(v.get("next").is_some(), "{v}");
+}
+
+#[test]
+fn focus_json_shape_and_text_claim_command() {
+    let b = TestBoard::start();
+    b.as_identity("eng-01", &["task", "create", "general", "focus candidate"]);
+
+    let out = b.as_identity("eng-01", &["focus", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("focus --json must be JSON");
+    assert_eq!(v["identity"], "eng-01", "{v}");
+    assert!(v["channels"].is_array(), "{v}");
+    assert!(v["tasks"].is_object(), "{v}");
+    assert!(v["recent"].is_array(), "{v}");
+    assert!(v.get("your_claimed_tasks").and_then(|n| n.as_u64()).is_some(), "{v}");
+    assert!(v["next"]["id"].as_str().is_some(), "{v}");
+
+    let out = b.as_identity("eng-01", &["focus"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("focus: eng-01"), "{stdout}");
+    assert!(stdout.contains("claim: keryx task claim general"), "{stdout}");
+}
+
+#[test]
+fn replay_limit_and_since_last_apply_per_channel() {
+    let b = TestBoard::start();
+    for i in 1..=3 {
+        b.post("eng-01", "general", &format!("general message {i}"));
+        b.as_identity("lead", &["post", "deploy-approvals", &format!("deploy message {i}")]);
+    }
+
+    // --limit is a per-channel bound, not a total across channels.
+    let out = b.as_identity("eng-01", &["replay", "--limit", "1", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("replay JSON");
+    assert_eq!(v["limit_per_channel"], 1, "{v}");
+    let channels = v["channels"].as_array().expect("channels array");
+    assert!(channels.len() >= 2, "both readable channels replay: {v}");
+    for channel in channels {
+        let count = channel["messages"].as_array().map(|m| m.len()).unwrap_or(usize::MAX);
+        assert!(count <= 1, "per-channel limit exceeded in {}: {channel}", channel["channel"]);
+    }
+
+    // Cursors resume per channel: a new post in one channel surfaces only there.
+    let saved = b.as_identity("eng-01", &["replay", "--save-cursor"]);
+    assert!(saved.status.success(), "{}", String::from_utf8_lossy(&saved.stderr));
+    b.post("eng-01", "general", "only general moves");
+    let out = b.as_identity("eng-01", &["replay", "--since-last", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("replay JSON");
+    for channel in v["channels"].as_array().expect("channels array") {
+        let bodies: Vec<&str> = channel["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m.get("body").and_then(|b| b.as_str()))
+            .collect();
+        if channel["channel"] == "general" {
+            assert_eq!(bodies, ["only general moves"], "{channel}");
+        } else {
+            assert!(bodies.is_empty(), "idle channel must replay nothing: {channel}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Operator plane: `admin report`, `admin recent`, and the web data shape.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn admin_report_lists_identities_channels_and_limits_without_seeds() {
+    let b = TestBoard::start();
+
+    // The report is a local operator command: it reads the config, not the
+    // board, so it runs outside a wrapper.
+    let out = b.keryx(&["admin", "report", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("admin report --json must be JSON");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["report_version"], 1);
+
+    for name in ["eng-01", "eng-02", "lead"] {
+        let id = v["identities"].as_array().unwrap().iter().find(|i| i["identity"] == name).unwrap_or_else(|| panic!("{name} missing: {v}"));
+        assert!(id["role"].as_str().is_some(), "{id}");
+        assert!(id["fingerprint"].as_str().is_some(), "{id}");
+        assert_eq!(id["key_present"], true, "{name} has a key on disk: {id}");
+        assert_eq!(id["key_matches_config"], true, "{name} key must match: {id}");
+    }
+
+    let general = v["channels"].as_array().unwrap().iter().find(|c| c["channel"] == "general").expect("general in the matrix");
+    assert!(general["post"].as_array().unwrap().iter().any(|g| g == "*"));
+    assert_eq!(general["allow_external"], true);
+    let approvals = v["channels"].as_array().unwrap().iter().find(|c| c["channel"] == "deploy-approvals").expect("restricted channel in the matrix");
+    assert!(approvals["post"].as_array().unwrap().iter().any(|g| g == "lead"));
+
+    assert!(v["limits"].is_object(), "{v}");
+
+    // Seeds are private material and must never appear in a report.
+    let text = serde_json::to_string(&v).unwrap();
+    assert!(!text.to_ascii_lowercase().contains("seed"), "report must never print key material");
+
+    // The text form names the matrix without dumping keys either.
+    let out = b.keryx(&["admin", "report"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("allow_external="), "{stdout}");
+    assert!(stdout.contains("eng-01"), "{stdout}");
+}
+
+#[test]
+fn admin_recent_reuses_the_read_path() {
+    let b = TestBoard::start();
+    b.post("eng-01", "general", "first recent");
+    b.post("eng-02", "general", "second recent");
+
+    // Filtered to one channel, newest messages, as JSON.
+    let out = b.as_identity("eng-01", &["admin", "recent", "--channel", "general", "--limit", "5", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("admin recent --json must be JSON");
+    assert_eq!(v["channel"], "general");
+    let bodies: Vec<&str> = v["messages"].as_array().unwrap().iter().filter_map(|m| m["body"].as_str()).collect();
+    assert!(bodies.contains(&"first recent"), "{bodies:?}");
+    assert!(bodies.contains(&"second recent"), "{bodies:?}");
+
+    // Unfiltered: newest first across readable channels.
+    let out = b.as_identity("eng-01", &["admin", "recent", "--limit", "10", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("admin recent --json must be JSON");
+    assert!(v["messages"].as_array().is_some());
+
+    // An unknown channel is refused like a read, not silently empty.
+    let out = b.as_identity("eng-01", &["admin", "recent", "--channel", "no-such-channel"]);
+    assert!(!out.status.success(), "unknown channel must fail: {out:?}");
+
+    // Outside a wrapper there is no relay, and that is the documented answer.
+    let out = b.keryx(&["admin", "recent", "--limit", "5"]);
+    assert!(!out.status.success(), "recent without a relay must fail: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no keryx relay"), "{stderr}");
+}
+
+#[test]
+fn web_data_shape_carries_operator_fields() {
+    let b = TestBoard::start();
+    assert_eq!(b.post("eng-01", "general", "operator age probe").status.code(), Some(0));
+    b.as_identity("eng-01", &["task", "create", "general", "operator web task"]);
+
+    // Pre-select an ephemeral port; tiny race, acceptable for the one request we perform.
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("bind scratch port")
+        .local_addr()
+        .expect("local addr")
+        .port();
+
+    let mut child = Command::new(sibling_bin("keryx"))
+        .arg("web")
+        .arg("--once")
+        .arg("--bind")
+        .arg(format!("127.0.0.1:{port}"))
+        .env("IDBOARD_HOME", b.home.path())
+        .env("IDBOARD_CONFIG", &b.config)
+        .env("IDBOARD_DAEMON", &b.socket)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn keryx web --once");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let child_stdout = child.stdout.take().expect("stdout piped");
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let mut reader = std::io::BufReader::new(child_stdout);
+        let _ = std::io::BufRead::read_line(&mut reader, &mut line);
+        let _ = tx.send(line);
+    });
+
+    let line = match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(line) => line,
+        Err(_) => {
+            let _ = child.kill();
+            panic!("keryx web --once did not print its URL in time");
+        }
+    };
+    let token = line
+        .split_whitespace()
+        .find(|part| part.starts_with("http://127.0.0.1:"))
+        .and_then(|url| url.trim_end_matches('/').rsplit('/').next().map(str::to_string))
+        .expect("ephemeral token in printed URL");
+
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to web console");
+    use std::io::Write;
+    write!(stream, "GET /{token}/data HTTP/1.0\r\nConnection: close\r\n\r\n").expect("write request");
+    let mut response = String::new();
+    std::io::Read::read_to_string(&mut stream, &mut response).expect("read response");
+    assert!(response.contains("HTTP/1.0 200 OK"), "{response}");
+    let body = response.split("\r\n\r\n").nth(1).unwrap_or("").trim_start_matches(|c| c == '\n' || c == '\r');
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|e| panic!("web /data must be JSON ({e}): {response}"));
+    assert_eq!(v["report_version"], 1);
+    assert!(v["board"]["channels"].is_array(), "{v}");
+    assert!(v["board"]["tasks"]["claimed_by"].is_object(), "{v}");
+    assert!(v["board"]["tasks"].get("oldest_unclaimed").is_some(), "{v}");
+    assert!(v["board"].get("last_message_age").is_some(), "{v}");
+    assert!(v["board"].get("last_message_age_ms").is_some(), "{v}");
 
     let status = child.wait().expect("keryx web --once exits after one request");
     assert!(status.success(), "{status:?}");

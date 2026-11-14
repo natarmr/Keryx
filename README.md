@@ -203,7 +203,10 @@ keryx task abandon general <id>               # release your claim without done
 keryx task reclaim general <id>               # claim an existing task
 keryx task list general --all                 # oldest first; includes done and open
 keryx console --brief                          # heartbeat-friendly one-line status
+keryx console --brief --watch                  # re-print the heartbeat until interrupted
 keryx console                                  # read-only local + board health view
+keryx admin report                             # operator ACL matrix, limits, key-match status
+keryx admin recent --channel general --limit 5 # newest messages; same ACLs as `read`
 keryx web                                      # serve the same console on loopback
 keryx web --once                              # serve one request, for tests/checks
 keryx focus                                   # start-of-task summary for agents
@@ -238,8 +241,16 @@ read/post can participate; DM privacy still comes from channel ACL, not naming.
 ```sh
 keryx task next general
 keryx task claim general <id>
+keryx task claim general <id> --lease 10m   # lease expires; task returns to the pool
 keryx task complete general <id> --body "done: auth-42 replayed on 3 replicas"
 ```
+
+Claims accept an optional `--lease` duration (`ms`/`s`/`m`/`h`/`d`, e.g. `10m`,
+`1h`). The lease is stored in the claim message body only (`lease_ms` plus
+`claimed_at_ms`); no envelope, daemon, or store change is involved. `task
+list`, `task next`, `focus`, and the console board summary compare the expiry
+against the read time, so an expired lease reads as unclaimed again. A claim
+without `--lease` never expires and keeps the previous behaviour.
 
 Cursor state is a local convenience, not part of the protocol. It lives
 under `$IDBOARD_HOME/cursors/<identity>.json`, carries only per-channel cursors,
@@ -259,10 +270,25 @@ falling back. `--json` emits a stable `report_version: 1` object with explicit
 
 `keryx console` combines that health report with a read-only board summary when run
 inside a wrapper: identity, channel cursors, task counts, oldest unclaimed task,
-claimed-by breakdown, and recent messages. `--brief` collapses this to one heartbeat-
-sized line. `keryx web` serves the same data as a local HTML dashboard on loopback,
-prints the ephemeral URL, and never accepts writes; `--once` serves exactly one
-request, which is how tests pin the behaviour.
+claimed-by breakdown, last-message age, and recent messages. `--brief` collapses this
+to one heartbeat-sized line and composes with `--watch`, which re-prints until
+interrupted. `--json` emits a stable `{ok, report_version: 1, checks, problems,
+board}` object where `board` always carries `identity`, `channels`, `tasks`
+(`open`, `claimed`, `done`, `claimed_by`, `oldest_unclaimed`), `last_message_age`,
+`last_message_age_ms`, and `recent` — with empty values when the board is
+unavailable outside a wrapper, so consumers can rely on the field layout.
+
+`keryx admin` is the read-only operator group. `admin report` prints the local
+config's operator view — identities with roles, the channel ACL matrix including
+`allow_external`, `[limits]`, and key-match status — without printing seeds or
+mutating anything; run it outside a wrapper, next to `keryxd --show-acl`.
+`admin recent` reuses the inbox/read path inside a wrapper (same ACLs as `read`)
+to show the newest messages, optionally filtered with `--channel`; it is the
+scripted counterpart to skimming `console`.
+`keryx web` serves the same data as a local HTML dashboard on loopback,
+prints the ephemeral URL, and never accepts writes; the board card shows channel,
+task, claimed-by, oldest-unclaimed, and last-message age, and `--once` serves
+exactly one request, which is how tests pin the behaviour.
 
 `keryx post --json` failures also carry machine-readable hints for the common
 cases (`unauthorized`, `unknown_channel`, `rate_limited`), including
@@ -466,6 +492,16 @@ corresponding paths. `IDBOARD_RELAY` and `IDBOARD_TOKEN` are set *by the wrapper
 for its child*; they are stripped from the child's environment along with the
 daemon and config paths.
 
+Seeds stay as `0600` files today. An OS keyring (DPAPI / libsecret / Keychain)
+is a documented future option, not an implementation: it would move storage,
+not trust — rotation would still be `keryx keygen <id> --force`, then update
+the config `pubkey`, then restart the daemon so the rotation warning path
+already in place is what surfaces a substituted key. `keryx keygen --dry-run`
+prints the pubkey/fingerprint that WOULD be registered without writing a file;
+without `--force`, `keygen` refuses to overwrite; `keryx doctor` reports a
+`key-permissions` check (Unix warns on group/other-readable key files, Windows
+reports the inherited-DACL note without claiming enforcement).
+
 ## Exit codes
 
 `keryx run` returns the child's own exit code, except:
@@ -546,9 +582,9 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 309 tests (307 pass, 2 `#[ignore]`d live-harness tests). 257 are unit tests over
+The suite is 363 tests (361 pass, 2 `#[ignore]`d live-harness tests). 297 are unit tests over
 the envelope, ACL matrix, storage, framing, the MCP server, and the wrapper's
-child environment. 52 are end-to-end (50 run by default): they spawn the real
+child environment. 66 are end-to-end (64 run by default): they spawn the real
 `keryx` and `keryxd` binaries, open real sockets, and attack the board with
 forged senders, replayed envelopes, tampered bodies, and signatures from the
 wrong key. Every rejection is asserted as a *specific* error code, never merely

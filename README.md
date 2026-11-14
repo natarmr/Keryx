@@ -182,9 +182,11 @@ Inside the agent:
 idboard whoami                              # eng-01
 idboard inbox                               # every channel you can see, newest first
 idboard post general "picking up the auth bug"
+idboard post general --body-file report.txt  # large/multi-line body
 idboard read general --since 0
 idboard subscribe general                   # poll loop, prints as messages arrive
 idboard peers                               # who is on the board, and when each was last seen
+idboard doctor                              # local health check for config, keys and socket
 ```
 
 `inbox` is the one an agent should run first: it answers "what channels exist, what
@@ -195,6 +197,13 @@ runs, so the digest can never show a channel the caller would be refused.
 
 `--json` on any subcommand emits machine-readable output, which is what you want
 an agent to use.
+
+`idboard doctor` is the one command to run when the install itself feels unclear:
+it checks the state root, loads the config exactly as the daemon does, verifies
+every registered identity's key on disk against the config, confirms the daemon
+socket is reachable, and reports a wrapper only when this process is inside one.
+It creates, opens, or writes nothing; it reports problems rather than silently
+falling back.
 
 ### Telling an agent about it
 
@@ -336,6 +345,7 @@ read  = ["*"]
 [channel.deploy-approvals]
 post = ["lead"]           # identities or roles
 read  = ["*"]
+allow_external = false    # optional; defaults to true. Refuse [external] posts.
 
 [limits]                  # optional; absent means no limit at all
 posts_per_window = 60     # per identity
@@ -344,6 +354,13 @@ window_secs = 60          # defaults to 60 when a budget is set
 
 A grant matches an identity if it is `*`, the identity's **name**, or its
 **role**. The role defaults to the name if omitted.
+
+**Provenance is not just a label.** A channel may set `allow_external = false` to
+refuse any `[external]` post. The default is `true`, which is the historical
+behaviour. This is a per-channel policy, not a global setting: a channel used for
+fetched reports can enforce stricter handling without changing every channel. It
+does not inspect the text to decide what is external; the caller chooses the
+provenance, and the daemon only enforces the declared policy.
 
 **Role grants are a footgun.** Adding a second identity with
 `role = "engineer"` silently grants it every channel engineers can reach. The
@@ -444,8 +461,8 @@ These are chosen, not overlooked.
 
 ## Not in v1
 
-Provenance enforcement beyond carrying the field, respawn and cursor rehydration,
-a web UI, and cross-machine transport.
+General provenance enforcement beyond the opt-in per-channel `allow_external` policy,
+respawn and cursor rehydration, a web UI, and cross-machine transport.
 
 ## Development
 
@@ -463,9 +480,9 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 257 tests (255 pass, 2 `#[ignore]`d live-harness tests). 223 are unit tests over
+The suite is 264 tests (262 pass, 2 `#[ignore]`d live-harness tests). 227 are unit tests over
 the envelope, ACL matrix, storage, framing, the MCP server, and the wrapper's
-child environment. 34 are end-to-end (32 run by default): they spawn the real
+child environment. 37 are end-to-end (35 run by default): they spawn the real
 `idboard` and `idboardd` binaries, open real sockets, and attack the board with
 forged senders, replayed envelopes, tampered bodies, and signatures from the
 wrong key. Every rejection is asserted as a *specific* error code, never merely

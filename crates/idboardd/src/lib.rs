@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use idboard_acl::{Config, Identity};
-use idboard_core::envelope::{Envelope, Op};
+use idboard_core::envelope::{Envelope, Op, Provenance};
 use idboard_core::error::{CoreError, ErrorCode};
 use idboard_core::ids::clamp_read_limit;
 use idboard_core::wire::{ChannelDigest, DaemonRequest, DaemonResponse, HandshakeReply, PeerStatus};
@@ -210,6 +210,23 @@ fn handle_post(
     env: &Envelope,
 ) -> Result<DaemonResponse, CoreError> {
     authorize(config, identity, &env.channel, Op::Post)?;
+
+    // Channel policy, applied after reachability authorisation: a channel may
+    // forbid external-provenance messages even when the caller may post.
+    if env.provenance == Provenance::External {
+        let ch = config.channel(&env.channel).expect("authorize already established the channel exists");
+        if !ch.allow_external {
+            return Err(CoreError::new(
+                ErrorCode::Unauthorized,
+                format!(
+                    "channel {:?} forbids external-provenance posts. Post with provenance \
+                     \"self\" if this content originated with you, or remove the \
+                     allow_external = false policy for this channel.",
+                    env.channel
+                ),
+            ));
+        }
+    }
 
     // After authorisation, before the append. An unauthorised post must not
     // consume budget, or an attacker holding any valid key could exhaust another
@@ -1318,6 +1335,26 @@ read = ["lead"]
 
     /// The window has to actually slide, and a refused post must not be charged
     /// (otherwise the refusal itself extends the lockout).
+    #[test]
+    fn a_channel_can_forbid_external_posts_while_allowing_self_posts() {
+        let mut f = fixture_with_extra(
+            r#"
+[channel.strict]
+post = ["*"]
+read = ["*"]
+allow_external = false
+"#,
+        );
+        let external = f.eng.sign_post("strict", "from elsewhere", Provenance::External, 1, T0).unwrap();
+        let res = f.board.handle(&request(external));
+        assert_eq!(res.error, Some(ErrorCode::Unauthorized), "{res:?}");
+
+        let self_content = f.eng.sign_post("strict", "from me", Provenance::SelfOriginated, 1, T0).unwrap();
+        let res = f.board.handle(&request(self_content));
+        assert!(res.ok, "self-provenance must remain accepted: {res:?}");
+        assert_eq!(f.board.store().last_seq("eng-01").unwrap(), 1);
+    }
+
     #[test]
     fn a_refused_post_is_not_charged_and_the_window_slides() {
         let mut f = budget_fixture(2);

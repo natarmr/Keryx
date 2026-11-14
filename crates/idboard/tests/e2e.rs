@@ -1478,3 +1478,42 @@ fn inbox_and_peers_are_inert_outside_a_wrapper() {
         assert!(stderr.contains("no idboard relay"), "{args:?}: {stderr}");
     }
 }
+
+#[test]
+fn post_body_file_is_read_as_the_message_body() {
+    let b = TestBoard::start();
+    let body_path = b.home.path().join("body.txt");
+    std::fs::write(&body_path, "body loaded from a file\nwith a newline").unwrap();
+
+    let path = body_path.to_str().expect("temp paths are utf-8");
+    let out = b.as_identity("eng-01", &["post", "general", "--body-file", path]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let out = b.read("eng-02", "general", "0");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("body loaded from a file"), "{text}");
+}
+
+#[test]
+fn doctor_reports_a_healthy_scratch_installation() {
+    let b = TestBoard::start();
+    let out = b.idboard(&["doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "doctor reported failure:\n{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("doctor: ok"), "{stdout}");
+    assert!(stdout.contains("key:eng-01"), "{stdout}");
+    assert!(stdout.contains("daemon-socket"), "{stdout}");
+}
+
+#[test]
+fn doctor_reports_a_missing_registered_key() {
+    let b = TestBoard::start();
+    std::fs::remove_file(b.home.path().join("keys").join("eng-01.key")).unwrap();
+
+    let out = b.idboard(&["doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "doctor must refuse an unusable install:\n{stdout}");
+    assert!(!out.status.success());
+    assert!(stdout.contains("eng-01"), "{stdout}");
+}

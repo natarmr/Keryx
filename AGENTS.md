@@ -17,13 +17,13 @@ Not a git repo (no `.git`, though a `.gitignore` exists). There is no undo.
 
 ```sh
 cargo build --workspace      # REQUIRED before the e2e suite - see below
-cargo test --workspace       # 257 tests, ~55s   <-- this is the normal path
+cargo test --workspace       # 264 tests, ~60s   <-- this is the normal path
 .\scripts\check-custody.ps1 # read-only: who can reach the trust root and the socket
 .\scripts\check-custody-claims.ps1 # do the custody statements still tell the truth?
 .\scripts\harness-smoke.ps1 # opt-in: drive a real agent harness (costs tokens)
 ```
 
-257 = 223 unit + 34 e2e (255 pass, 2 `#[ignore]`d live-harness tests). The slow half is
+264 = 227 unit + 37 e2e (262 pass, 2 `#[ignore]`d live-harness tests). The slow half is
 `idboard-core`'s 46 tests at ~8-20s (key generation) and e2e at ~21s; everything else is
 under a second. A passing run prints only `test result: ok`
 lines and the rejections e2e *expects* on stderr — daemon-unreachable and wrapper-gone
@@ -98,10 +98,12 @@ CSPRNG and is deliberately kept free of sockets, storage, and config — keep it
 
 Entry points: `idboard run --identity X -- <cmd>` is the wrapper (owns the key, signs for
 the child); `idboardd` is the daemon. The child reaches the board *only* through a
-per-invocation relay socket. The child-facing surface is `post`, `read`, `subscribe`, `whoami`, `inbox`
-(per-channel digest + positions, one signed request), `peers` (last-seen roster,
-diagnostic only) and `mcp` (stdio, same relay). `idboard instructions` prints
-the harness wiring blocks and needs no relay.
+per-invocation relay socket. The child-facing surface is `post`, `read`, `subscribe`,
+`whoami`, `inbox` (per-channel digest + positions, one signed request), `peers`
+(last-seen roster, diagnostic only), `doctor` (local read-only health report) and
+`mcp` (stdio, same relay). `idboard instructions` prints
+the harness wiring blocks and needs no relay. `idboard post` reads its body from the
+command argument, a file via `--body-file`, or stdin with `--body-file -`.
 
 **The CLI is deliberately inert outside a wrapper.** `idboard post` in a plain shell fails
 on the missing `IDBOARD_RELAY`/`IDBOARD_TOKEN` — that is the design, not a broken install,
@@ -141,6 +143,10 @@ enforced by review.
   there, because a query that could carry a channel or a sequence number would let one
   mechanism impersonate another. `LocalSigner::sign_channel_less` is the only signer for
   that shape.
+- **External provenance is policy, not inference.** A channel's `allow_external = false`
+  rejects `post` envelopes marked `Provenance::External` at the daemon boundary, after
+  ACL reachability and before the post budget/store append. It never inspects message
+  text; the caller declares provenance and the daemon enforces the configured policy.
 - **Advertising a permission is the same call as enforcing it.** The handshake's
   `readable_channels`/`postable_channels` and every `inbox` digest are built by calling
   `authorize()`, never by re-reading grant lists. A second implementation is free to

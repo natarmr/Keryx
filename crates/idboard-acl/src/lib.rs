@@ -103,6 +103,17 @@ pub struct ChannelConfig {
     /// Identities or roles permitted to read. Empty means nobody.
     #[serde(default)]
     pub read: Vec<String>,
+    /// Whether external-provenance posts are accepted on this channel.
+    ///
+    /// Defaults to true, which is the historical behaviour. Set this to `false`
+    /// for channels where content fetched from elsewhere must never enter the
+    /// conversation as an actionable message.
+    #[serde(default = "default_allow_external")]
+    pub allow_external: bool,
+}
+
+fn default_allow_external() -> bool {
+    true
 }
 
 /// What the daemon learned about one identity at load time.
@@ -132,6 +143,9 @@ pub struct Channel {
     pub name: String,
     pub post: Vec<String>,
     pub read: Vec<String>,
+    /// Accepted external-provenance posts. `false` means they are refused before
+    /// authorisation is allowed to mutate anything.
+    pub allow_external: bool,
 }
 
 impl Channel {
@@ -276,7 +290,12 @@ impl Config {
                     }
                 }
             }
-            channels.insert(name.clone(), Channel { name: name.clone(), post: cc.post.clone(), read: cc.read.clone() });
+            channels.insert(name.clone(), Channel {
+                name: name.clone(),
+                post: cc.post.clone(),
+                read: cc.read.clone(),
+                allow_external: cc.allow_external,
+            });
         }
 
         if identities.is_empty() {
@@ -413,10 +432,11 @@ impl Config {
         out.push_str("channels:\n");
         for c in self.channels.values() {
             out.push_str(&format!(
-                "  {:<20} post=[{}] read=[{}]\n",
+                "  {:<20} post=[{}] read=[{}] allow_external={}\n",
                 c.name,
                 c.post.join(" "),
-                c.read.join(" ")
+                c.read.join(" "),
+                if c.allow_external { "yes" } else { "no" }
             ));
         }
         // Printed unconditionally: "no limit" is a configuration fact an
@@ -570,6 +590,22 @@ read = ["*"]
 
     /// A limit nobody configured must not exist. The default is the product
     /// behaving exactly as it did before `[limits]` existed.
+    #[test]
+    fn channel_external_posts_are_allowed_by_default_and_can_be_forbidden() {
+        let c = cfg_with(&standard()).unwrap();
+        assert!(c.channel("general").unwrap().allow_external);
+        assert!(c.summary().contains("allow_external=yes"), "{}", c.summary());
+
+        let strict = format!(
+            "{}\n[channel.strict]\npost = [\"*\"]\nread = [\"*\"]\nallow_external = false\n",
+            standard()
+        );
+        let c = cfg_with(&strict).unwrap();
+        let ch = c.channel("strict").unwrap();
+        assert!(!ch.allow_external);
+        assert!(c.summary().contains("allow_external=no"), "{}", c.summary());
+    }
+
     #[test]
     fn limits_are_unlimited_by_default_and_say_so_in_the_summary() {
         let c = cfg_with(&standard()).unwrap();

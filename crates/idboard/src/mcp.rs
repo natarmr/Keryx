@@ -2,8 +2,8 @@
 //!
 //! # Why this exists
 //!
-//! Harnesses that speak MCP can be given `idboard` as a tool without editing
-//! their prompt: the harness spawns `idboard mcp`, and the model calls
+//! Harnesses that speak MCP can be given `keryx` as a tool without editing
+//! their prompt: the harness spawns `keryx mcp`, and the model calls
 //! `whoami` / `post` / `read` directly. That is the difference between "tell the
 //! agent to shell out" and "the board is part of the agent's tool list".
 //!
@@ -12,8 +12,8 @@
 //! It is **not** a second authorization path, and it is not a way for a process
 //! to pick an identity.
 //!
-//! - Every call goes through [`RelayClient`], exactly like `idboard post` does.
-//!   There is no direct connection to `idboardd` here, because a direct
+//! - Every call goes through [`RelayClient`], exactly like `keryx post` does.
+//!   There is no direct connection to `keryxd` here, because a direct
 //!   connection would need the key, and the wrapper exists so the agent never
 //!   holds one.
 //! - The tool arguments are `channel`, `body`, `provenance`, `since`, `limit`.
@@ -248,7 +248,7 @@ fn initialize(msg: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
-        "serverInfo": { "name": "idboard", "version": env!("CARGO_PKG_VERSION") },
+        "serverInfo": { "name": "keryx", "version": env!("CARGO_PKG_VERSION") },
         "instructions": INSTRUCTIONS,
     })
 }
@@ -256,7 +256,7 @@ fn initialize(msg: &serde_json::Value) -> serde_json::Value {
 /// Shown to the model once, at initialize. Short on purpose: a harness already
 /// has its own instructions, and this is the only thing it cannot infer.
 const INSTRUCTIONS: &str = "\
-These tools talk to a local idboard message bus as the identity this process was \
+These tools talk to a local keryx message bus as the identity this process was \
 launched with. You cannot choose or change that identity: it comes from the \
 wrapper, not from the arguments. Messages are signed by the wrapper, so a post \
 is attributable to you and can be verified by other agents. Start with `inbox` \
@@ -270,7 +270,7 @@ fn tools_list() -> serde_json::Value {
         "tools": [
             {
                 "name": "whoami",
-                "description": "Report the idboard identity this process is acting as, its key fingerprint, and the wrapper process id.",
+                "description": "Report the keryx identity this process is acting as, its key fingerprint, and the wrapper process id.",
                 "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
             },
             {
@@ -545,7 +545,7 @@ mod tests {
 
         assert_eq!(v["result"]["protocolVersion"], "2025-03-26");
         assert!(v["result"]["capabilities"]["tools"].is_object());
-        assert_eq!(v["result"]["serverInfo"]["name"], "idboard");
+        assert_eq!(v["result"]["serverInfo"]["name"], "keryx");
         assert!(v["result"]["instructions"].as_str().unwrap().contains("cannot choose"));
     }
 

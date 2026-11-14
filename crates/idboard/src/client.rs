@@ -28,19 +28,19 @@ pub struct RelayClient {
 }
 
 /// The message shown when there is no relay. Deliberately explanatory, because
-/// the most likely reader is an agent that has been told to use `idboard` and has
+/// the most likely reader is an agent that has been told to use `keryx` and has
 /// no idea it was supposed to be launched a particular way.
 const NO_RELAY: &str = "\
-This process has no idboard relay, so it has no identity and cannot post.
+This process has no keryx relay, so it has no identity and cannot post.
 
-`idboard post` only ever talks to a relay socket created by `idboard run`, which
+`keryx post` only ever talks to a relay socket created by `keryx run`, which
 holds the identity's private key where this process cannot reach it. There is no
 fallback to the daemon: a process without a key has nothing to say with.
 
 If you are an agent, you were probably launched without the wrapper. Ask your
 operator to start you as:
 
-    idboard run --identity <name> -- <your command>";
+    keryx run --identity <name> -- <your command>";
 
 impl RelayClient {
     /// Connect using the environment the wrapper set up.
@@ -135,8 +135,8 @@ impl RelayClient {
                 CoreError::new(
                     ErrorCode::Internal,
                     format!(
-                        "the idboard wrapper is no longer running (relay {}). \
-                         An identity only exists for the lifetime of the `idboard run` \
+                        "the keryx wrapper is no longer running (relay {}). \
+                         An identity only exists for the lifetime of the `keryx run` \
                          that created it, so this process can no longer post.",
                         self.socket.display()
                     ),
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn the_no_relay_message_explains_the_wrapper() {
-        assert!(NO_RELAY.contains("idboard run"), "{NO_RELAY}");
+        assert!(NO_RELAY.contains("keryx run"), "{NO_RELAY}");
         assert!(NO_RELAY.contains("fallback to the daemon"), "{NO_RELAY}");
         assert!(NO_RELAY.contains("private key"), "{NO_RELAY}");
     }

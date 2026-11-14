@@ -2,7 +2,7 @@
 //!
 //! # Why this exists
 //!
-//! Two concurrent `idboard run --identity X` processes would share one key and
+//! Two concurrent `keryx run --identity X` processes would share one key and
 //! interleave their sequence numbers. The board could not then tell which
 //! process posted a given message, which destroys post-incident attribution —
 //! the main thing a signed board is for.
@@ -33,7 +33,7 @@ pub struct IdentityLock {
 /// Why a lock could not be taken.
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
-    #[error("identity {identity:?} is already in use by another `idboard run` (lock {path}, pid {pid})")]
+    #[error("identity {identity:?} is already in use by another `keryx run` (lock {path}, pid {pid})")]
     Held { identity: String, path: String, pid: u32 },
 
     #[error("cannot open lock file {path}: {source}")]

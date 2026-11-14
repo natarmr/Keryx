@@ -21,7 +21,7 @@ struct FileCursors {
     cursors: BTreeMap<String, i64>,
 }
 
-/// A per-identity store kept under the idboard state root.
+/// A per-identity store kept under the keryx state root.
 #[derive(Debug)]
 pub struct CursorStore {
     path: PathBuf,

@@ -116,7 +116,7 @@ impl Board {
                 format!(
                     "no identity {:?} is registered. Keys are never learned on first use, \
                      because any local process could claim the name first and lock you out. \
-                     Run `idboard keygen {}` and add the result to the config.",
+                     Run `keryx keygen {}` and add the result to the config.",
                     env.sender_id, env.sender_id
                 ),
             )
@@ -334,7 +334,7 @@ fn handle_read(
     //
     // `i64::MAX` is the one exception, and it is a documented sentinel rather
     // than an accident: it means "tell me the current end and nothing else".
-    // `idboard subscribe` uses it to start at the present without replaying
+    // `keryx subscribe` uses it to start at the present without replaying
     // history, so echoing it back would hand the caller a cursor that can never
     // match a row and it would poll silently forever. Answering with the real
     // high-water mark is what the caller actually asked for.
@@ -469,7 +469,7 @@ const MAX_LOG_FIELD: usize = 128;
 /// identity on a channel it may not touch — which corrupts the post-incident
 /// attribution record the operator relies on. And even once newlines are escaped,
 /// the text is still *confusable* with the line's own fields:
-/// `channel=lead\x0aidboardd: rejected op=post` reads, at a glance, like
+/// `channel=lead\x0akeryxd: rejected op=post` reads, at a glance, like
 /// structure rather than like a value.
 ///
 /// So escaping alone is not enough. A value built only from the characters
@@ -689,7 +689,7 @@ read = ["*"]
         assert_eq!(verified.sender_id, "lead");
     }
 
-    /// `idboard subscribe` bootstraps its cursor with `SINCE_CURRENT_END` so it
+    /// `keryx subscribe` bootstraps its cursor with `SINCE_CURRENT_END` so it
     /// starts at the present instead of replaying history.
     ///
     /// The obvious implementation — echo `since` back when the page is empty —
@@ -789,7 +789,7 @@ read = ["*"]
         let res = f.board.handle(&post_req(&f.stranger, "general", "hi", 1));
         assert_eq!(res.error, Some(ErrorCode::UnknownIdentity), "{res:?}");
         let detail = res.detail.unwrap();
-        assert!(detail.contains("idboard keygen stranger"), "should name the fix: {detail}");
+        assert!(detail.contains("keryx keygen stranger"), "should name the fix: {detail}");
     }
 
     #[test]

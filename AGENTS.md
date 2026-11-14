@@ -2,28 +2,29 @@
 
 ## What this is
 
-A local, cryptographically identified message bus (`idboard`) for coordinating several AI
+A local, cryptographically identified message bus (`keryx`) for coordinating several AI
 agent CLIs on one machine. The security model is the product: read the trust-boundary
-section of `README.md` before changing anything in `idboard-core`, `idboardd`, or the
-wrapper.
+section of `README.md` before changing anything in `idboard-core`, `idboardd` (the
+implementation crate; the installed daemon command is `keryxd`), or the wrapper.
 
-**The directory is named `a2aboard`, but the project is `idboard` everywhere** — crates,
-binaries, `~/.idboard/`, and the `IDBOARD_*` env vars. The mismatch is pre-existing; do not
-"fix" it as drive-by work.
+**The directory is named `a2aboard`; the implementation crates and protocol string remain
+`idboard`, while the command and daemon binaries are `keryx` and `keryxd`.** The state dir
+`~/.idboard/`, the `IDBOARD_*` env vars, the protocol domain `"idboard/v1\0"`, and all key/message
+compatibility are intentionally unchanged by the command rename.
 
-Not a git repo (no `.git`, though a `.gitignore` exists). There is no undo.
+This tree is a git repository. `cargo test --workspace` is the gate; there is no CI.
 
 ## Commands
 
 ```sh
 cargo build --workspace      # REQUIRED before the e2e suite - see below
-cargo test --workspace       # 276 tests, ~60s   <-- this is the normal path
+cargo test --workspace       # 300 tests, ~60s   <-- this is the normal path
 .\scripts\check-custody.ps1 # read-only: who can reach the trust root and the socket
 .\scripts\check-custody-claims.ps1 # do the custody statements still tell the truth?
 .\scripts\harness-smoke.ps1 # opt-in: drive a real agent harness (costs tokens)
 ```
 
-276 = 232 unit + 44 e2e (274 pass, 2 `#[ignore]`d live-harness tests). The slow half is
+300 = 255 unit + 45 e2e (298 pass, 2 `#[ignore]`d live-harness tests). The slow half is
 `idboard-core`'s 46 tests at ~8-20s (key generation) and e2e at ~21s; everything else is
 under a second. A passing run prints only `test result: ok`
 lines and the rejections e2e *expects* on stderr — daemon-unreachable and wrapper-gone
@@ -35,8 +36,8 @@ stderr, PowerShell turns native stderr into error records, and `cargo test --wor
 Select-String …` can report exit 1 with every test passing. Redirect to a file and read
 `$LASTEXITCODE`, or grep the `test result:` lines.
 
-Config-only validation, no daemon needed: `idboardd --check` (reports every problem at
-once) and `idboardd --show-acl` (resolved channel matrix).
+Config-only validation, no daemon needed: `keryxd --check` (reports every problem at
+once) and `keryxd --show-acl` (resolved channel matrix).
 
 **Smart App Control is currently OFF on this machine, so `cargo test --workspace` just works
 and `scripts\test.ps1` is not needed.** That is a machine setting, not a property of the repo;
@@ -70,9 +71,9 @@ cargo test -p idboard --test e2e -- --exact a_tampered_body_is_rejected   # need
 
 - **`cargo build --workspace` first, always.** `crates/idboard/tests/e2e.rs` locates the
   real binaries as *siblings in `target/debug`* (`sibling_bin`), not via
-  `CARGO_BIN_EXE_*`, because the tests need `idboardd` — a different package. `cargo build -p
-  idboard` does **not** build `idboardd.exe` (verified), so a package-scoped run on a clean
-  target dir fails with `idboardd not built; run cargo build first`. This also means
+  `CARGO_BIN_EXE_*`, because the tests need `keryxd` — a different package. `cargo build -p
+  idboard` does **not** build `keryxd.exe` (verified), so a package-scoped run on a clean
+  target dir fails with `keryxd not built; run cargo build first`. This also means
   `scripts\test.ps1 -Package idboard` is only safe once the workspace has been built.
 - **`rustfmt` and `clippy` are not installed** on this toolchain. `cargo fmt` and
   `cargo clippy` both fail with `not installed for the toolchain`. Don't try; don't
@@ -93,22 +94,22 @@ CSPRNG and is deliberately kept free of sockets, storage, and config — keep it
 | `idboard-acl` | config parsing, identity registry, role resolution, channel ACLs, `[limits]` |
 | `idboard-store` | SQLite; the replay counter, forward reads, tail reads, last-seen roster |
 | `idboard-ipc` | `interprocess` local sockets, newline-delimited JSON framing |
-| `idboardd` | `Board` (all security decisions: authorisation, digests, post budget) + a thin `main.rs` |
-| `idboard` | CLI, keystore, identity lock, wrapper, relay, MCP front-end |
+| `idboardd` crate (`keryxd` binary) | `Board` (all security decisions: authorisation, digests, post budget) + a thin `main.rs` |
+| `idboard` crate (`keryx` binary) | CLI, keystore, identity lock, wrapper, relay, MCP front-end |
 
-Entry points: `idboard run --identity X -- <cmd>` is the wrapper (owns the key, signs for
-the child); `idboardd` is the daemon. The child reaches the board *only* through a
+Entry points: `keryx run --identity X -- <cmd>` is the wrapper (owns the key, signs for
+the child); `keryxd` is the daemon. The child reaches the board *only* through a
 per-invocation relay socket. The child-facing surface is `post`, `read`, `subscribe`,
 `whoami`, `inbox`, `peers` (last-seen roster, diagnostic only), `doctor`,
 `task`, `dm`, `notify`, `mention`, `react`, `cursor`, `mcp`.
-`idboard instructions` prints
-the harness wiring blocks and needs no relay. `idboard post` reads its body from the
+`keryx instructions` prints
+the harness wiring blocks and needs no relay. `keryx post` reads its body from the
 command argument, a file via `--body-file`, or stdin with `--body-file -`.
 
-**The CLI is deliberately inert outside a wrapper.** `idboard post` in a plain shell fails
+**The CLI is deliberately inert outside a wrapper.** `keryx post` in a plain shell fails
 on the missing `IDBOARD_RELAY`/`IDBOARD_TOKEN` — that is the design, not a broken install,
 so do not add a fallback path to the daemon to "make it work". To exercise the CLI by hand,
-go through `idboard run --identity X -- <cmd>`; e2e's `as_identity` is the same thing.
+go through `keryx run --identity X -- <cmd>`; e2e's `as_identity` is the same thing.
 
 `run-1/` is **not source**. It is the output tree of a prior security audit (report,
 ledger, per-hunter scratch). All six findings are `needs_validation` from a source-only
@@ -171,8 +172,8 @@ enforced by review.
   `subscribe` may use `$IDBOARD_HOME/cursors/<identity>.json` with `--since-last` /
   `--since-last --save-cursor`. The daemon never reads it; a corrupt or missing file is
   an explicit error, not a silent reset to `0`; the file carries only per-channel cursors.
-- **`idboard mcp` is a front-end, not a second auth path.** It goes through `RelayClient`
-  like the CLI, and it must never reach `idboardd` directly — that route needs the key,
+- **`keryx mcp` is a front-end, not a second auth path.** It goes through `RelayClient`
+  like the CLI, and it must never reach `keryxd` directly — that route needs the key,
   which is the thing the wrapper exists to withhold. Its tool arguments are only
   `channel`/`body`/`provenance`/`since`/`limit`; an `identity` or `token` argument is
   ignored rather than honoured, and the sender comes from the relay handshake. Starting
@@ -189,7 +190,7 @@ enforced by review.
 - **`RelayRequest` must never gain a sender/seq/timestamp/signature field.** Its lack of
   them is the reason a child cannot construct an envelope. The wrapper fills all of them in.
 - **No trust-on-first-use.** Every identity needs an explicit `pubkey` in the config;
-  `idboardd` refuses to start without one. Learning a key from the first message claiming a
+  `keryxd` refuses to start without one. Learning a key from the first message claiming a
   name would let any local process claim `lead` and lock the real one out permanently.
 - **One live wrapper per identity** (advisory lock). Two wrappers would interleave sequence
   numbers and destroy post-incident attribution. The pid lives in a *separate* `.pid` file
@@ -226,7 +227,7 @@ enforced by review.
   was not the key on disk.
 - **`SINCE_CURRENT_END` (`i64::MAX`) is a request for a position, not a claim about one.**
   A read asked that way answers with `store.high_water_cursor()`. Echoing the sentinel back
-  hands a poller a cursor no row can ever match, which is what made `idboard subscribe` poll
+  hands a poller a cursor no row can ever match, which is what made `keryx subscribe` poll
   silently forever. Any other empty read still echoes the caller's own cursor.
 
 ## Windows / platform notes
@@ -296,7 +297,7 @@ enforced by review.
   transcript, because a model can say anything. `docs/harnesses.md` holds the measured
   matrix — which harnesses can be driven headlessly here, which cannot, and the failure
   catalogue — and `scripts\harness-smoke.ps1` is the runner.
-- `idboardd`'s `Board` takes an injectable `Clock` (`with_clock` / `with_fixed_clock`) so
+- `keryxd`'s `Board` takes an injectable `Clock` (`with_clock` / `with_fixed_clock`) so
   skew-window tests never sleep. Use it rather than adding sleeps.
 - Storage tests use `Store::open_in_memory()`.
 - There is no migration framework. The schema is one `SCHEMA` const of
@@ -320,7 +321,7 @@ also strips `IDBOARD_RELAY`'s siblings — `IDBOARD_DAEMON`, `IDBOARD_CONFIG`, `
 — from the child. That stripping is defence in depth, not the control: the control is that
 the child holds no key. Don't treat a stripped env var as a guarantee.
 
-`idboard run` exit codes are a contract for supervising scripts: 0 is the child's code, then
+`keryx run` exit codes are a contract for supervising scripts: 0 is the child's code, then
 2 locked, 3 not-in-config, 4 key mismatch, 5 daemon unreachable, 6 spawn failed, 7 relay
 failed, 130 interrupted. `clamp_code` truncates to a `u8`, deliberately keeping 2/3/4 exact.
 

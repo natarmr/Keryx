@@ -1,4 +1,4 @@
-//! `idboard run`: the wrapper that makes an identity real.
+//! `keryx run`: the wrapper that makes an identity real.
 //!
 //! Owns the private key, signs everything the child asks for, and gives the
 //! child no way to sign anything itself. See the crate docs for the three
@@ -110,7 +110,7 @@ pub enum WrapperError {
     #[error("{0}")]
     Locked(#[from] LockError),
 
-    #[error("identity {identity:?} is not in {config}. Keys are never learned on first use.\n  Run: idboard keygen {identity}\n  Then add it under [identity.{identity}] in {config}")]
+    #[error("identity {identity:?} is not in {config}. Keys are never learned on first use.\n  Run: keryx keygen {identity}\n  Then add it under [identity.{identity}] in {config}")]
     NotInConfig { identity: String, config: String },
 
     #[error(
@@ -126,7 +126,7 @@ pub enum WrapperError {
         config_fp: String,
     },
 
-    #[error("idboard daemon is unreachable at {socket}: {detail}\n  Start it with: idboardd")]
+    #[error("keryx daemon is unreachable at {socket}: {detail}\n  Start it with: keryxd")]
     DaemonUnreachable { socket: String, detail: String },
 
     #[error("cannot start {command:?}: {source}")]
@@ -200,7 +200,7 @@ pub fn run_child(opts: &WrapperOptions) -> Result<i32, WrapperError> {
         // rather than fatal. Worth saying out loud, because it means a typo in
         // the identity name silently produced a second key.
         eprintln!(
-            "idboard: generated a new key for {:?}\n  fingerprint: {}\n  pubkey: {}",
+            "keryx: generated a new key for {:?}\n  fingerprint: {}\n  pubkey: {}",
             opts.identity,
             signer.fingerprint(),
             signer.public_hex()
@@ -257,7 +257,7 @@ pub fn run_child(opts: &WrapperOptions) -> Result<i32, WrapperError> {
 
     relay::cleanup(&relay_path);
     eprintln!(
-        "idboard: identity {:?} signed {} message(s); next seq would be {:?}",
+        "keryx: identity {:?} signed {} message(s); next seq would be {:?}",
         opts.identity,
         relay.signed_count(),
         relay.next_seq()
@@ -380,7 +380,7 @@ fn serve_until_exit(
                 Ok(Some(stream)) => serve_one(relay, stream),
                 Ok(None) => break,
                 Err(e) => {
-                    eprintln!("idboard: relay accept failed: {e}");
+                    eprintln!("keryx: relay accept failed: {e}");
                     break;
                 }
             }
@@ -425,7 +425,7 @@ fn serve_one(relay: &Arc<Relay>, stream: idboard_ipc::Stream) {
 
     let mut writer = stream;
     if let Err(e) = idboard_ipc::write_frame(&mut writer, &response) {
-        eprintln!("idboard: could not answer the relay request: {e}");
+        eprintln!("keryx: could not answer the relay request: {e}");
     }
 }
 
@@ -546,7 +546,7 @@ mod tests {
     fn a_missing_executable_reports_the_spawn_exit_code() {
         let mut opts = WrapperOptions::new(
             "eng-01",
-            vec!["idboard-no-such-binary-4f2a9c".into(), "arg".into()],
+            vec!["keryx-no-such-binary-4f2a9c".into(), "arg".into()],
         );
         opts.dry_run = true;
         let err = spawn_child(&opts, &PathBuf::from("unused-relay"), "t").unwrap_err();

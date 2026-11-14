@@ -35,7 +35,7 @@ This is the one security item that could plausibly be "finished" by adding a
 hand-built Windows security descriptor to the pipe listener. On the machine where
 `scripts/check-custody.ps1` was last run it **reports the standard-profile outcome**:
 the state root inherits full control for the owner, `SYSTEM` and `Administrators`,
-and no broader in-scope principal is visible. README "What idboard does *not*
+and no broader in-scope principal is visible. README "What keryx does *not*
 defend against" states that same-user processes are inside the boundary by design.
 
 Adding a descriptor now would be ~80 lines of `unsafe` Win32, a new platform
@@ -60,10 +60,10 @@ construction.
 
 ## What the audit did not cover, and now exists
 
-The audit predates `idboard mcp`, `idboard inbox`, `idboard peers`, and
+The audit predates `keryx mcp`, `keryx inbox`, `keryx peers`, and
 `[limits]`. The trust-boundary property they must all preserve is the same one:
 
-- `idboard mcp` is a front-end over `RelayClient`, never a second route to the
+- `keryx mcp` is a front-end over `RelayClient`, never a second route to the
   daemon, and takes no identity argument.
 - `inbox` and `peers` are read-class queries signed by the wrapper, so they cost
   no sequence numbers and cannot be constructed by a child.

@@ -1,6 +1,6 @@
 //! End-to-end tests: real binaries, real sockets, real signatures.
 //!
-//! These drive the shipped `idboard` and `idboardd` executables. Nothing is
+//! These drive the shipped `keryx` and `keryxd` executables. Nothing is
 //! stubbed, because the properties under test are exactly the ones a unit test
 //! with an injected clock and an in-memory store would paper over.
 //!
@@ -8,7 +8,7 @@
 //!
 //! Two different routes, on purpose:
 //!
-//! - **As a legitimate agent.** Spawn `idboard run --identity X -- idboard post
+//! - **As a legitimate agent.** Spawn `keryx run --identity X -- keryx post
 //!   ...`, which is the supported path, and check what the board records.
 //! - **As an attacker.** The test holds the private keys (it generated them) and
 //!   the daemon socket path (it chose the path), so it can put arbitrary bytes
@@ -33,8 +33,8 @@ use idboard_ipc::IpcError;
 
 /// Path to a sibling binary in `target/debug`, derived from the test executable.
 ///
-/// `env!("CARGO_BIN_EXE_idboard")` only works for the package that owns the bin,
-/// and these tests need `idboardd` too, which is a different package.
+/// `env!("CARGO_BIN_EXE_keryx")` only works for the package that owns the bin,
+/// and these tests need `keryxd` too, which is a different package.
 fn sibling_bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("test exe path");
     // target/debug/deps/<test-bin>.exe -> target/debug/<name>.exe
@@ -101,11 +101,11 @@ impl TestBoard {
         board
     }
 
-    /// Run `idboard keygen` for each identity, returning identity -> pubkey.
+    /// Run `keryx keygen` for each identity, returning identity -> pubkey.
     fn generate_keys(&self, identities: &[&str]) -> std::collections::HashMap<String, String> {
         let mut out = std::collections::HashMap::new();
         for id in identities {
-            let out_cmd = self.idboard(&["keygen", id, "--pubkey-only"]);
+            let out_cmd = self.keryx(&["keygen", id, "--pubkey-only"]);
             let stdout = String::from_utf8_lossy(&out_cmd.stdout).trim().to_string();
             assert_eq!(out_cmd.status.code(), Some(0), "keygen {id} failed: {out_cmd:?}");
             assert_eq!(stdout.len(), 64, "pubkey for {id} should be 64 hex chars, got {stdout:?}");
@@ -122,26 +122,26 @@ impl TestBoard {
         ]
     }
 
-    /// Run the `idboard` CLI directly, outside any wrapper.
-    fn idboard(&self, args: &[&str]) -> Output {
-        let mut cmd = Command::new(sibling_bin("idboard"));
+    /// Run the `keryx` CLI directly, outside any wrapper.
+    fn keryx(&self, args: &[&str]) -> Output {
+        let mut cmd = Command::new(sibling_bin("keryx"));
         cmd.args(args);
         for (k, v) in self.env() {
             cmd.env(k, v);
         }
-        cmd.output().expect("run idboard")
+        cmd.output().expect("run keryx")
     }
 
     /// Run the CLI as `identity`, through the wrapper. This is the supported path.
     fn as_identity(&self, identity: &str, args: &[&str]) -> Output {
-        let mut cmd = Command::new(sibling_bin("idboard"));
+        let mut cmd = Command::new(sibling_bin("keryx"));
         cmd.arg("run").arg("--identity").arg(identity).arg("--");
-        cmd.arg(sibling_bin("idboard"));
+        cmd.arg(sibling_bin("keryx"));
         cmd.args(args);
         for (k, v) in self.env() {
             cmd.env(k, v);
         }
-        cmd.output().expect("run idboard run")
+        cmd.output().expect("run keryx run")
     }
 
     fn post(&self, identity: &str, channel: &str, body: &str) -> Output {
@@ -182,7 +182,7 @@ impl TestBoard {
     fn spawn_daemon(&mut self) {
         let log = std::fs::File::create(&self.log).expect("create log");
         let err = log.try_clone().expect("clone log");
-        let mut cmd = Command::new(sibling_bin("idboardd"));
+        let mut cmd = Command::new(sibling_bin("keryxd"));
         cmd.arg("--config").arg(&self.config);
         cmd.arg("--socket").arg(&self.socket);
         cmd.arg("--db").arg(&self.db);
@@ -193,7 +193,7 @@ impl TestBoard {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(err))
             .spawn()
-            .expect("spawn idboardd");
+            .expect("spawn keryxd");
         self.daemon = Some(child);
         self.wait_until_listening();
     }
@@ -207,7 +207,7 @@ impl TestBoard {
             std::thread::sleep(Duration::from_millis(25));
         }
         panic!(
-            "idboardd did not start listening on {}\n--- log ---\n{}",
+            "keryxd did not start listening on {}\n--- log ---\n{}",
             self.socket.display(),
             self.daemon_log()
         );
@@ -265,7 +265,7 @@ fn unique_socket() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(format!(r"\\.\pipe\idboard-test-{}-{n}", std::process::id()))
     } else {
-        std::env::temp_dir().join(format!("idboard-test-{}-{n}.sock", std::process::id()))
+        std::env::temp_dir().join(format!("keryx-test-{}-{n}.sock", std::process::id()))
     }
 }
 
@@ -455,10 +455,10 @@ fn the_cli_refuses_to_act_outside_a_wrapper() {
     ] {
         // Deliberately no IDBOARD_RELAY / IDBOARD_TOKEN, even though the daemon
         // socket is known and reachable.
-        let out = b.idboard(&args);
+        let out = b.keryx(&args);
         assert_ne!(out.status.code(), Some(0), "{args:?} should fail: {out:?}");
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("idboard run"), "{args:?} stderr should name the wrapper: {stderr}");
+        assert!(stderr.contains("keryx run"), "{args:?} stderr should name the wrapper: {stderr}");
     }
     assert!(b.senders("general").is_empty(), "nothing may reach the board");
 }
@@ -478,13 +478,13 @@ fn a_second_wrapper_for_a_live_identity_is_refused() {
     let b = TestBoard::start();
 
     // A long-lived child, so the first wrapper is still holding the identity.
-    let mut first = Command::new(sibling_bin("idboard"));
+    let mut first = Command::new(sibling_bin("keryx"));
     first
         .arg("run")
         .arg("--identity")
         .arg("eng-01")
         .arg("--")
-        .arg(sibling_bin("idboard"))
+        .arg(sibling_bin("keryx"))
         .args(["subscribe", "general", "--interval-ms", "50"]);
     for (k, v) in b.env() {
         first.env(k, v);
@@ -525,15 +525,15 @@ fn an_identity_absent_from_the_config_is_refused_with_the_fix() {
     let out = b.as_identity("never-registered", &["post", "general", "hi"]);
     assert_eq!(out.status.code(), Some(3), "expected the not-in-config exit code: {out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("idboard keygen never-registered"), "stderr: {stderr}");
+    assert!(stderr.contains("keryx keygen never-registered"), "stderr: {stderr}");
 }
 
 #[test]
 fn an_unreachable_daemon_is_reported_clearly() {
     let b = TestBoard::start();
     let missing = unique_socket();
-    let mut cmd = Command::new(sibling_bin("idboard"));
-    cmd.args(["run", "--identity", "eng-01", "--"]).arg(sibling_bin("idboard")).arg("whoami");
+    let mut cmd = Command::new(sibling_bin("keryx"));
+    cmd.args(["run", "--identity", "eng-01", "--"]).arg(sibling_bin("keryx")).arg("whoami");
     for (k, v) in b.env() {
         cmd.env(k, v);
     }
@@ -541,7 +541,7 @@ fn an_unreachable_daemon_is_reported_clearly() {
     let out = cmd.output().expect("run");
     assert_eq!(out.status.code(), Some(5), "expected the daemon-unreachable code: {out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("idboardd"), "stderr should say how to start it: {stderr}");
+    assert!(stderr.contains("keryxd"), "stderr should say how to start it: {stderr}");
 }
 
 /// Killing a wrapper mid-flight must not damage the board for anyone else.
@@ -550,13 +550,13 @@ fn killing_a_wrapper_leaves_the_board_usable() {
     let b = TestBoard::start();
     assert_eq!(b.post("eng-01", "general", "before the kill").status.code(), Some(0));
 
-    let mut victim = Command::new(sibling_bin("idboard"));
+    let mut victim = Command::new(sibling_bin("keryx"));
     victim
         .arg("run")
         .arg("--identity")
         .arg("eng-02")
         .arg("--")
-        .arg(sibling_bin("idboard"))
+        .arg(sibling_bin("keryx"))
         .args(["subscribe", "general", "--interval-ms", "50"]);
     for (k, v) in b.env() {
         victim.env(k, v);
@@ -609,7 +609,7 @@ fn a_sequence_number_is_not_reusable_across_restarts_of_the_wrapper() {
     assert_eq!(b.post("eng-01", "general", "one").status.code(), Some(0));
     assert_eq!(b.post("eng-01", "general", "two").status.code(), Some(0));
 
-    // Each `idboard run` is a fresh wrapper, so each resumes from the daemon's
+    // Each `keryx run` is a fresh wrapper, so each resumes from the daemon's
     // high-water mark rather than restarting at 1.
     assert_eq!(b.post("eng-01", "general", "three").status.code(), Some(0));
     assert_eq!(b.post("eng-01", "general", "four").status.code(), Some(0));
@@ -654,7 +654,7 @@ fn provenance_is_carried_through_to_readers() {
 #[test]
 fn a_second_daemon_cannot_displace_a_live_one() {
     let b = TestBoard::start();
-    let mut second = Command::new(sibling_bin("idboardd"));
+    let mut second = Command::new(sibling_bin("keryxd"));
     second.arg("--config").arg(&b.config).arg("--socket").arg(&b.socket).arg("--db").arg(&b.db);
     for (k, v) in b.env() {
         second.env(k, v);
@@ -668,7 +668,7 @@ fn a_second_daemon_cannot_displace_a_live_one() {
 /// Spawn a wrapper with its relay socket and token pinned, so the test can talk
 /// to the relay directly.
 ///
-/// This drives `run_child` from the library rather than the `idboard` binary,
+/// This drives `run_child` from the library rather than the `keryx` binary,
 /// which is the only way to learn the socket path and token without adding a
 /// subcommand whose entire purpose would be to print a credential to whatever
 /// process asked. The child is a `subscribe`, so the wrapper stays up while the
@@ -695,7 +695,7 @@ impl TestBoard {
         let mut opts = idboard::wrapper::WrapperOptions::new(
             &identity,
             vec![
-                sibling_bin("idboard").display().to_string(),
+                sibling_bin("keryx").display().to_string(),
                 "subscribe".into(),
                 "general".into(),
                 "--interval-ms".into(),
@@ -975,7 +975,7 @@ fn a_peer_that_never_writes_to_the_relay_cannot_wedge_the_wrapper() {
 ///
 /// Posted over the wire rather than through the CLI, because a 64 KiB body on a
 /// command line exceeds the Windows command-line limit — which is a property of
-/// `CreateProcess`, not of idboard, and would make this test fail for the wrong
+/// `CreateProcess`, not of keryx, and would make this test fail for the wrong
 /// reason.
 #[test]
 fn a_backlog_larger_than_one_frame_is_still_readable() {
@@ -1020,7 +1020,7 @@ fn a_backlog_larger_than_one_frame_is_still_readable() {
 // MCP: the board as a tool list rather than a shell command.
 // ---------------------------------------------------------------------------
 
-/// A live `idboard mcp` process, driven over its stdio pipes.
+/// A live `keryx mcp` process, driven over its stdio pipes.
 ///
 /// The server reads one JSON-RPC line and writes one line per request, so the
 /// helper reads a byte at a time rather than wrapping stdout in a `BufReader`:
@@ -1032,12 +1032,12 @@ struct McpProcess {
 }
 
 impl McpProcess {
-    /// Spawn `idboard mcp`, either under the wrapper (with an identity) or bare.
+    /// Spawn `keryx mcp`, either under the wrapper (with an identity) or bare.
     fn spawn(board: &TestBoard, identity: Option<&str>) -> Self {
-        let mut cmd = Command::new(sibling_bin("idboard"));
+        let mut cmd = Command::new(sibling_bin("keryx"));
         if let Some(name) = identity {
             cmd.arg("run").arg("--identity").arg(name).arg("--");
-            cmd.arg(sibling_bin("idboard"));
+            cmd.arg(sibling_bin("keryx"));
         }
         cmd.arg("mcp");
         for (k, v) in board.env() {
@@ -1048,7 +1048,7 @@ impl McpProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn idboard mcp");
+            .expect("spawn keryx mcp");
         Self { child, line: Vec::new() }
     }
 
@@ -1112,7 +1112,7 @@ fn mcp_serves_the_wrappers_identity_and_the_board_tools() {
     let mut mcp = McpProcess::spawn(&b, Some("eng-01"));
 
     let init = mcp.send(initialize_request());
-    assert_eq!(init["result"]["serverInfo"]["name"], "idboard");
+    assert_eq!(init["result"]["serverInfo"]["name"], "keryx");
 
     let tools = mcp.send(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let names: Vec<&str> = tools["result"]["tools"]
@@ -1198,14 +1198,14 @@ fn mcp_without_a_wrapper_starts_and_explains_the_missing_relay() {
     let mut mcp = McpProcess::spawn(&b, None);
 
     let init = mcp.send(initialize_request());
-    assert_eq!(init["result"]["serverInfo"]["name"], "idboard");
+    assert_eq!(init["result"]["serverInfo"]["name"], "keryx");
 
     let who = mcp.call(2, "whoami", serde_json::json!({}));
     assert!(who.get("error").is_none(), "a missing relay must not kill the server: {who}");
     assert_eq!(who["result"]["isError"], true);
     let text = tool_text(&who);
-    assert!(text.contains("no idboard relay"), "unhelpful failure: {text}");
-    assert!(text.contains("idboard run"), "the message must name the fix: {text}");
+    assert!(text.contains("no keryx relay"), "unhelpful failure: {text}");
+    assert!(text.contains("keryx run"), "the message must name the fix: {text}");
 
     mcp.close();
 }
@@ -1213,7 +1213,7 @@ fn mcp_without_a_wrapper_starts_and_explains_the_missing_relay() {
 // ---------------------------------------------------------------------------
 // Live harness conformance.
 //
-// The integration is harness-agnostic on purpose: `idboard run --identity X --
+// The integration is harness-agnostic on purpose: `keryx run --identity X --
 // <anything>` hands the child a relay and a token, and the child has no need to
 // know what a harness is. These tests prove that for a *real* harness, not a
 // stub, and are `#[ignore]`d because they need a model, a network, and money.
@@ -1255,18 +1255,18 @@ fn drain(child: &mut Child) -> (String, String) {
 ///
 /// `argv` is the harness's own headless invocation. It is the only part that is
 /// harness-specific; everything about identity, signing, and transport is
-/// `idboard`'s and is identical for every harness.
+/// `keryx`'s and is identical for every harness.
 fn live_harness_posts(harness: &str, argv: &[String], prompt: &str, nonce: &str) {
     let b = TestBoard::start();
 
-    // The agent must be able to resolve `idboard` the way a real operator's
+    // The agent must be able to resolve `keryx` the way a real operator's
     // agent would, so put the built binary on PATH rather than relying on where
     // this test happens to live.
-    let bin_dir = sibling_bin("idboard").parent().expect("target/debug").to_path_buf();
+    let bin_dir = sibling_bin("keryx").parent().expect("target/debug").to_path_buf();
     let path = std::env::var_os("PATH").unwrap_or_default();
     let joined = format!("{};{}", bin_dir.display(), path.to_string_lossy());
 
-    let mut cmd = Command::new(sibling_bin("idboard"));
+    let mut cmd = Command::new(sibling_bin("keryx"));
     cmd.arg("run").arg("--identity").arg("eng-01").arg("--");
     cmd.arg(&argv[0]);
     cmd.args(&argv[1..]);
@@ -1325,8 +1325,8 @@ fn live_nonce() -> String {
 fn live_prompt(nonce: &str) -> String {
     format!(
         "You are checking a local message bus. Do exactly this and nothing else:\n\
-         1. Run the shell command `idboard whoami` and note the identity it prints.\n\
-         2. Run `idboard post general \"{nonce} from <identity>\"`, replacing <identity> with the \
+         1. Run the shell command `keryx whoami` and note the identity it prints.\n\
+         2. Run `keryx post general \"{nonce} from <identity>\"`, replacing <identity> with the \
          identity from step 1 and keeping the nonce exactly as written.\n\
          3. Reply with one line: WHOAMI <identity>\n\
          Do not read or modify any files. Do not post more than once."
@@ -1350,7 +1350,7 @@ fn opencode_posts_through_the_wrapper() {
     let nonce = live_nonce();
     let prompt = live_prompt(&nonce);
 
-    // The model is an account property, not a property of idboard, and a free
+    // The model is an account property, not a property of keryx, and a free
     // model can be retired mid-week. With no model the harness picks its own
     // default, which may fail for reasons that have nothing to do with this
     // integration.
@@ -1366,7 +1366,7 @@ fn opencode_posts_through_the_wrapper() {
 }
 
 /// `muse exec` is the headless path. `--yolo` disables approval and the sandbox
-/// so the agent can run `idboard` inside the wrapper non-interactively; the
+/// so the agent can run `keryx` inside the wrapper non-interactively; the
 /// prompt still constrains what it is asked to do.
 #[test]
 #[ignore = "spends model tokens; run scripts\\harness-smoke.ps1 -Harness muse"]
@@ -1479,10 +1479,10 @@ fn peers_shows_the_roster_and_never_invents_presence() {
 fn inbox_and_peers_are_inert_outside_a_wrapper() {
     let b = TestBoard::start();
     for args in [&["inbox"][..], &["peers"][..]] {
-        let out = b.idboard(args);
+        let out = b.keryx(args);
         assert!(!out.status.success(), "{args:?} must fail without a relay");
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("no idboard relay"), "{args:?}: {stderr}");
+        assert!(stderr.contains("no keryx relay"), "{args:?}: {stderr}");
     }
 }
 
@@ -1635,7 +1635,7 @@ fn post_body_file_is_read_as_the_message_body() {
 #[test]
 fn doctor_reports_a_healthy_scratch_installation() {
     let b = TestBoard::start();
-    let out = b.idboard(&["doctor"]);
+    let out = b.keryx(&["doctor"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "doctor reported failure:\n{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
     assert!(stdout.contains("doctor: ok"), "{stdout}");
@@ -1646,7 +1646,7 @@ fn doctor_reports_a_healthy_scratch_installation() {
 #[test]
 fn doctor_json_uses_a_stable_report_shape() {
     let b = TestBoard::start();
-    let out = b.idboard(&["doctor", "--json"]);
+    let out = b.keryx(&["doctor", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("doctor --json must be JSON");
     assert_eq!(v["ok"], true);
@@ -1660,9 +1660,21 @@ fn doctor_reports_a_missing_registered_key() {
     let b = TestBoard::start();
     std::fs::remove_file(b.home.path().join("keys").join("eng-01.key")).unwrap();
 
-    let out = b.idboard(&["doctor"]);
+    let out = b.keryx(&["doctor"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "doctor must refuse an unusable install:\n{stdout}");
     assert!(!out.status.success());
     assert!(stdout.contains("eng-01"), "{stdout}");
+}
+
+/// The old binaries are kept as compatibility aliases during the rename.
+#[test]
+fn the_legacy_command_aliases_are_still_installed() {
+    for (name, expected) in [("idboard", "keryx"), ("idboardd", "keryxd")] {
+        let out = Command::new(sibling_bin(name)).arg("--version").output().expect("run compatibility binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{name} alias must run, got {out:?}");
+        assert!(stdout.contains(expected) || stderr.contains(expected), "{name} did not produce {expected}'s output: {stdout} {stderr}");
+    }
 }

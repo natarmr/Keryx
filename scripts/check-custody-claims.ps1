@@ -115,7 +115,7 @@ else {
     Check "unix arm claims enforcement"      ($u.Contains('enforced')) $u
 }
 
-Write-Host "`n=== idboardd startup ordering ===" -ForegroundColor Cyan
+Write-Host "`n=== keryxd startup ordering ===" -ForegroundColor Cyan
 $main = Get-Content -LiteralPath "$root\crates\idboardd\src\main.rs" -Raw
 Check "prints Config::custody_statement"          ($main.Contains('Config::custody_statement()')) 'not called'
 Check "prints listener_custody_statement"         ($main.Contains('idboard_ipc::listener_custody_statement()')) 'not called'

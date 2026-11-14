@@ -33,7 +33,7 @@ pub const SEED_LEN: usize = 32;
 /// Keystore failures.
 #[derive(Debug, thiserror::Error)]
 pub enum KeystoreError {
-    #[error("no key for identity {0:?}; run `idboard keygen {0}` and add the result to your config")]
+    #[error("no key for identity {0:?}; run `keryx keygen {0}` and add the result to your config")]
     Missing(String),
 
     #[error("key file {path} is {len} bytes, expected exactly {SEED_LEN}")]
@@ -47,7 +47,7 @@ pub enum KeystoreError {
     },
 
     #[error("a key for {identity:?} already exists at {path}; refusing to replace it. \
-             Run `idboard keygen {identity}` to print the key that is actually on disk")]
+             Run `keryx keygen {identity}` to print the key that is actually on disk")]
     AlreadyExists { identity: String, path: String },
 }
 
@@ -112,7 +112,7 @@ impl Keystore {
     /// produces valid-looking output.
     ///
     /// The link also makes this refuse to replace an existing key, which a plain
-    /// rename would not: `rename` replaces on Windows, so two `idboard keygen`
+    /// rename would not: `rename` replaces on Windows, so two `keryx keygen`
     /// runs racing for one identity both generate, the second wins the rename,
     /// and the first then prints a public key that is not the key on disk. The
     /// operator pastes that key into the config and every post fails with
@@ -313,13 +313,13 @@ mod tests {
     #[test]
     fn missing_key_error_names_the_fix() {
         let err = KeystoreError::Missing("lead".into());
-        assert!(err.to_string().contains("idboard keygen lead"), "{err}");
+        assert!(err.to_string().contains("keryx keygen lead"), "{err}");
     }
 
     /// A key must never be silently replaced.
     ///
     /// `save_seed` used to end in `std::fs::rename`, which replaces the target on
-    /// Windows. Two `idboard keygen` runs racing for one identity both saw no key,
+    /// Windows. Two `keryx keygen` runs racing for one identity both saw no key,
     /// both generated one, the second won the rename, and the first then printed a
     /// public key that was not the key on disk — which an operator would paste into
     /// the config and watch every post fail with `bad_signature`.
@@ -358,7 +358,7 @@ mod tests {
         ks.load_or_create("eng-01").unwrap();
         let (_, seed) = idboard_core::keys::LocalSigner::generate("eng-01").unwrap();
         let msg = ks.save_seed("eng-01", &seed).unwrap_err().to_string();
-        assert!(msg.contains("idboard keygen eng-01"), "{msg}");
+        assert!(msg.contains("keryx keygen eng-01"), "{msg}");
     }
 
     /// `load_or_create` is also check-then-act, and it must not be the thing that

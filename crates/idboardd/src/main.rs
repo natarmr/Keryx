@@ -1,4 +1,4 @@
-//! `idboardd`: the daemon.
+//! `keryxd`: the daemon.
 //!
 //! Deliberately thin. Every security decision lives in [`idboardd::Board`],
 //! which is tested without a socket; this file moves bytes and logs.
@@ -29,7 +29,7 @@ const WORKERS: usize = 4;
 const QUEUE_DEPTH: usize = 64;
 
 #[derive(Debug, Parser)]
-#[command(name = "idboardd", version, about = "The idboard daemon.", long_about = None)]
+#[command(name = "keryxd", version, about = "The keryx daemon.", long_about = None)]
 struct Args {
     /// Path to the identity and ACL config.
     #[arg(long)]
@@ -57,7 +57,7 @@ fn main() -> ExitCode {
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("idboardd: {e:#}");
+            eprintln!("keryxd: {e:#}");
             ExitCode::FAILURE
         }
     }
@@ -70,12 +70,12 @@ fn run(args: Args) -> anyhow::Result<()> {
 
     let config = Config::load(&config_path).map_err(|e| anyhow::anyhow!("{e:#}"))?;
 
-    eprintln!("idboardd: loaded {}", config_path.display());
-    eprintln!("idboardd: {}", Config::custody_statement());
-    eprintln!("idboardd: {}", idboard_ipc::listener_custody_statement());
+    eprintln!("keryxd: loaded {}", config_path.display());
+    eprintln!("keryxd: {}", Config::custody_statement());
+    eprintln!("keryxd: {}", idboard_ipc::listener_custody_statement());
     eprint!("{}", config.summary());
     for warning in config.role_inheritance_warnings() {
-        eprintln!("idboardd: warning: {warning}");
+        eprintln!("keryxd: warning: {warning}");
     }
 
     if args.show_acl {
@@ -87,7 +87,7 @@ fn run(args: Args) -> anyhow::Result<()> {
 
     for identity in rotated {
         eprintln!(
-            "idboardd: warning: the public key for {identity:?} differs from the one stored in {}. \
+            "keryxd: warning: the public key for {identity:?} differs from the one stored in {}. \
              Messages signed with the old key will no longer verify. If this was not a deliberate \
              rotation, restore the previous pubkey in the config.",
             db_path.display()
@@ -95,7 +95,7 @@ fn run(args: Args) -> anyhow::Result<()> {
     }
 
     if args.check {
-        eprintln!("idboardd: check passed; {} identities, socket {}", board.config().identity_count(), socket_path.display());
+        eprintln!("keryxd: check passed; {} identities, socket {}", board.config().identity_count(), socket_path.display());
         return Ok(());
     }
 
@@ -107,8 +107,8 @@ fn run(args: Args) -> anyhow::Result<()> {
     let listener = idboard_ipc::bind(&socket_path)
         .map_err(|e| anyhow::anyhow!("cannot listen on {}: {e}", socket_path.display()))?;
 
-    eprintln!("idboardd: listening on {}", socket_path.display());
-    eprintln!("idboardd: database {}", db_path.display());
+    eprintln!("keryxd: listening on {}", socket_path.display());
+    eprintln!("keryxd: database {}", db_path.display());
 
     let (tx, rx) = sync_channel::<idboard_ipc::Stream>(QUEUE_DEPTH);
     let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
@@ -139,10 +139,10 @@ fn run(args: Args) -> anyhow::Result<()> {
         }));
     }
 
-    eprintln!("idboardd: {WORKERS} workers ready");
+    eprintln!("keryxd: {WORKERS} workers ready");
     if !idboard_ipc::deadlines_installed() {
         eprintln!(
-            "idboardd: note: this platform's named pipes carry no I/O deadline. A peer that \
+            "keryxd: note: this platform's named pipes carry no I/O deadline. A peer that \
              connects and stops writing is given up after {}s, and costs one parked thread.",
             idboard_ipc::IO_TIMEOUT.as_secs()
         );
@@ -156,7 +156,7 @@ fn run(args: Args) -> anyhow::Result<()> {
             }
             Err(e) => {
                 // One bad connection must not take the daemon down.
-                eprintln!("idboardd: accept failed: {e}");
+                eprintln!("keryxd: accept failed: {e}");
             }
         }
     }
@@ -196,7 +196,7 @@ fn serve(board: &std::sync::Mutex<Board>, mut stream: idboard_ipc::Stream) {
                 let code = res.error.unwrap_or(ErrorCode::Internal);
                 let detail = res.detail.clone().unwrap_or_default();
                 eprintln!(
-                    "idboardd: {}",
+                    "keryxd: {}",
                     rejection_line(&req.envelope, &CoreError::new(code, detail))
                 );
             }
@@ -207,6 +207,6 @@ fn serve(board: &std::sync::Mutex<Board>, mut stream: idboard_ipc::Stream) {
     };
 
     if let Err(e) = idboard_ipc::write_frame(&mut stream, &response) {
-        eprintln!("idboardd: could not answer: {e}");
+        eprintln!("keryxd: could not answer: {e}");
     }
 }

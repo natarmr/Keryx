@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
+name = "keryx"
+path = "src/main.rs"
+
+# Compatibility alias for existing scripts and agent instructions.
+[[bin]]
 name = "idboard"
 path = "src/main.rs"
 

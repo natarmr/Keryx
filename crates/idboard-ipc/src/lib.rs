@@ -453,7 +453,7 @@ mod tests {
 
     fn temp_socket(tag: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let name = format!("idboard-test-{tag}-{}-{:?}", std::process::id(), std::thread::current().id());
+        let name = format!("keryx-test-{tag}-{}-{:?}", std::process::id(), std::thread::current().id());
         // Named pipes dislike some characters; keep it simple.
         let name: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
         let path = if cfg!(windows) {

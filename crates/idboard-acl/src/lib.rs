@@ -233,7 +233,7 @@ impl Config {
                 None => {
                     problems.push(format!(
                         "[identity.{name}]: pubkey is required. \
-                         Run `idboard keygen {name}` and paste the result. \
+                         Run `keryx keygen {name}` and paste the result. \
                          Keys are never learned on first use, because any local \
                          process could claim the name first and lock you out."
                     ));
@@ -496,7 +496,7 @@ impl Config {
 fn check_custody(path: &std::path::Path) -> std::result::Result<(), String> {
     let link = std::fs::symlink_metadata(path).map_err(|e| format!("cannot stat the config: {e}"))?;
     if link.file_type().is_symlink() {
-        return Err("the config is a symlink; idboard will not follow a symlinked trust root".into());
+        return Err("the config is a symlink; keryx will not follow a symlinked trust root".into());
     }
     if !link.is_file() {
         return Err("the config is not a regular file".into());
@@ -722,7 +722,7 @@ post = ["*"]
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("pubkey is required"), "{msg}");
-        assert!(msg.contains("idboard keygen eng-01"), "error should name the command: {msg}");
+        assert!(msg.contains("keryx keygen eng-01"), "error should name the command: {msg}");
     }
 
     /// The TOFU hazard, stated as a test: no path assigns a key to a name that

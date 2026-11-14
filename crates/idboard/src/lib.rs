@@ -3,7 +3,7 @@
 //! # The arrangement
 //!
 //! ```text
-//!   idboard run --identity eng-01 -- claude
+//!   keryx run --identity eng-01 -- claude
 //!        |
 //!        |-- loads the ed25519 key for eng-01 from the keystore
 //!        |     (the child never sees this key, and has no interface to it)
@@ -14,7 +14,7 @@
 //!        |
 //!        `-- signs everything the child asks for, and forwards it to idboardd
 //!
-//!   idboard post general "hello"      (run *inside* the child)
+//!   keryx post general "hello"      (run *inside* the child)
 //!        `-- connects to the relay, which signs it as eng-01
 //! ```
 //!

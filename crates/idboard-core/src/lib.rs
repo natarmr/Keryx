@@ -7,7 +7,7 @@
 //!
 //! # The two authentication mechanisms
 //!
-//! idboard uses two different mechanisms, on purpose, because the ops have two
+//! keryx uses two different mechanisms, on purpose, because the ops have two
 //! different guarantees to make.
 //!
 //! **Posts** mutate the board, so they are authenticated by a per-identity

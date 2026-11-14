@@ -5,13 +5,13 @@
 
 use std::path::{Path, PathBuf};
 
-/// Relay socket name. Injected into the child by `idboard run`.
+/// Relay socket name. Injected into the child by `keryx run`.
 ///
 /// This is the only channel a child process has to the board. If it is absent,
 /// the CLI refuses to act rather than falling back to the daemon.
 pub const ENV_RELAY: &str = "IDBOARD_RELAY";
 
-/// Bearer token for the relay socket. Injected into the child by `idboard run`.
+/// Bearer token for the relay socket. Injected into the child by `keryx run`.
 ///
 /// A local socket name is not a secret on its own. On Unix, any process can
 /// `stat` the path; on Windows, any process can enumerate `\\.\pipe\*`. The
@@ -162,7 +162,7 @@ pub fn ensure_dir(dir: &Path) -> std::io::Result<()> {
 ///
 /// On Windows this is a no-op beyond creating the directory. NTFS inherits ACLs
 /// from the parent, so a directory under `%USERPROFILE%` already inherits a DACL
-/// granting the creating account and SYSTEM and denying Everyone. idboard does
+/// granting the creating account and SYSTEM and denying Everyone. keryx does
 /// **not** set or verify that DACL, and there is no Windows file-ACL code
 /// anywhere in the tree. The reliance is stated rather than enforced: the daemon
 /// prints `Config::custody_statement` at startup, and the operator can check the

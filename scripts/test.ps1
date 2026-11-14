@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Run the idboard workspace tests, working around Smart App Control.
+    Run the keryx workspace tests, working around Smart App Control.
 
 .DESCRIPTION
     Smart App Control on this machine refuses to execute some locally built,

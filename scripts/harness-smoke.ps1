@@ -1,19 +1,19 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Prove a real agent harness can post through `idboard run`.
+    Prove a real agent harness can post through `keryx run`.
 
 .DESCRIPTION
     Runs one live conformance test: a scratch state root, two identities, a real
     daemon, and a real harness launched by the wrapper. The harness is given a
-    prompt that tells it to call `idboard whoami` and then post a nonce. The test
+    prompt that tells it to call `keryx whoami` and then post a nonce. The test
     asserts on the *board*, not on the model's prose: the nonce must be stored,
     and it must be signed by the identity the wrapper was launched with.
 
     This spends model tokens and needs network access, which is why it is not
     part of `cargo test --workspace`. Nothing here writes to a real `~/.idboard`.
 
-    Harness support is a property of the harness, not of idboard:
+    Harness support is a property of the harness, not of keryx:
 
       opencode   `opencode run --auto --format json "<prompt>"`   works
       muse       `muse exec --yolo "<prompt>"`                    works when configured
@@ -101,9 +101,9 @@ function Invoke-Native([scriptblock] $Command) {
     try { & $Command } finally { $ErrorActionPreference = $previous }
 }
 
-# The e2e harness locates idboardd as a sibling binary, so a package-scoped build
+# The e2e harness locates keryxd as a sibling binary, so a package-scoped build
 # is not enough. Same rule as `cargo test --workspace`.
-Write-Host "building the workspace (the e2e harness needs target\debug\idboardd.exe)"
+Write-Host "building the workspace (the e2e harness needs target\debug\keryxd.exe)"
 Invoke-Native { & cargo build --workspace *> $log }
 if ($LASTEXITCODE -ne 0) {
     Write-Host "cargo build --workspace failed:"
@@ -131,7 +131,7 @@ $env:IDBOARD_LIVE_HARNESS = $Harness
 $env:IDBOARD_LIVE_HARNESS_BIN = $HarnessBin
 if ($Model) { $env:IDBOARD_LIVE_HARNESS_MODEL = $Model } else { Remove-Item Env:\IDBOARD_LIVE_HARNESS_MODEL -ErrorAction SilentlyContinue }
 try {
-    Write-Host "driving $Harness under idboard run (timeout ${TimeoutSeconds}s), log: $log"
+    Write-Host "driving $Harness under keryx run (timeout ${TimeoutSeconds}s), log: $log"
     # Redirect to a file and read $LASTEXITCODE. Piping cargo's stderr through
     # PowerShell turns native stderr into error records, which makes a passing
     # run look like a failure when the harness writes JSON-lines to stdout.

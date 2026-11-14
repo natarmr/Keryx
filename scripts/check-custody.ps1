@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Report who can reach idboard's trust root and its door.
+    Report who can reach keryx's trust root and its door.
 
 .DESCRIPTION
     Two separate custody assumptions, and it is worth keeping them apart:
@@ -15,7 +15,7 @@
 
       2. the daemon and relay sockets - the door. Every local process can reach
          a named pipe; a Unix socket path can be stat'd. Neither has a security
-         descriptor set by idboard, so on Windows the listener inherits the
+         descriptor set by keryx, so on Windows the listener inherits the
          creating token's default DACL. Every control behind the socket is a
          signature check, which anyone may attempt.
 
@@ -32,7 +32,7 @@
 #>
 [CmdletBinding()]
 param(
-    # Also inspect the live daemon pipe. Requires a running idboardd, and on
+    # Also inspect the live daemon pipe. Requires a running keryxd, and on
     # Windows a busy pipe may refuse inspection - that is reported, not hidden.
     [switch] $IncludeSocket
 )
@@ -104,7 +104,7 @@ Note 'README places same-user processes inside the boundary, and root/SYSTEM/Adm
 Note 'On a standard profile, BUILTIN\Users and Everyone are absent from both listings above.'
 
 Section '4. What this cannot tell you'
-Note 'idboard does not set a security descriptor on either listener, so the pipe'
+Note 'keryx does not set a security descriptor on either listener, so the pipe'
 Note "inherits the creating token's default DACL. This script cannot read a busy pipe."
 Note 'The remaining in-boundary peer is a SAME-USER process, which is excluded from'
-Note 'neither surface by design - see README "What idboard does not defend against".'
+Note 'neither surface by design - see README "What keryx does not defend against".'

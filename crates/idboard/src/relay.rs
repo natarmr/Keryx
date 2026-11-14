@@ -115,7 +115,7 @@ impl Relay {
             return Err(CoreError::new(
                 ErrorCode::Unauthorized,
                 "relay token is missing or wrong. This socket belongs to a specific \
-                 `idboard run` invocation, and the token is only in that process's \
+                 `keryx run` invocation, and the token is only in that process's \
                  environment.",
             ));
         }
@@ -180,7 +180,7 @@ impl Relay {
             Err(e) => Err(CoreError::new(
                 ErrorCode::Internal,
                 format!(
-                    "cannot reach the idboard daemon at {}: {e}. Is `idboardd` running?",
+                    "cannot reach the keryx daemon at {}: {e}. Is `keryxd` running?",
                     self.daemon_socket.display()
                 ),
             )),
@@ -282,7 +282,7 @@ mod tests {
             Some(ErrorCode::Internal),
             "authorisation should pass and the forward should fail: {res:?}"
         );
-        assert!(res.detail.unwrap().contains("idboardd"), "should name the daemon");
+        assert!(res.detail.unwrap().contains("keryxd"), "should name the daemon");
     }
 
     #[test]

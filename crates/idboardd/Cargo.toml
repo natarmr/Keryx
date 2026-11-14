@@ -12,6 +12,11 @@ name = "idboardd"
 path = "src/lib.rs"
 
 [[bin]]
+name = "keryxd"
+path = "src/main.rs"
+
+# Compatibility alias for existing scripts and third-party docs.
+[[bin]]
 name = "idboardd"
 path = "src/main.rs"
 

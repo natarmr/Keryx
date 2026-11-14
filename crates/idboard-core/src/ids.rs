@@ -1,6 +1,6 @@
 //! Structural limits and identifier validation.
 //!
-//! idboard talks to sockets that any local process can connect to, so every
+//! keryx talks to sockets that any local process can connect to, so every
 //! inbound field is untrusted until proven otherwise. These limits bound what a
 //! caller can make the daemon allocate before any signature check happens.
 

@@ -40,7 +40,7 @@ authorization input).
 | Harness | Headless invocation | Status | Notes |
 |---|---|---|---|
 | `muse` 1.4.18 | `muse exec --yolo "<prompt>"` | **Verified** | `scripts\harness-smoke.ps1 -Harness muse` passed (2026-11-13): a real muse agent posted a signed message through the wrapper (env inherited, `idboard` resolved from PATH, board asserted). The launcher shim is resolved to its real `muse-bin-*.exe`. |
-| `opencode` 2.1.4 | `opencode run --auto --format json --model <m> "<prompt>"` | **Blocked by local config** | Smoke attempted 2026-11-13 but the harness exited before posting: `Configuration is invalid at C:\Users\ramra\.config\opencode\opencode.jsonc` (`V2 permissions are not supported by OpenCode V1... permissions`). Not an idboard defect; fix/isolate the global config, then re-run. Earlier (2026-10-21, v2.0.29) the wrapper/relay mechanism was verified but tool-calling was blocked by an expired Console key. |
+| `opencode` 2.3.0 | `opencode run --auto --format json "<prompt>"` | **Verified with isolated config** | 2026-11-14: smoke passed with `XDG_CONFIG_HOME` pointing at an empty `opencode.jsonc` (resolves a working bundled `opencode.exe` at `~\.bun\bin\opencode.exe`). The user’s normal config at `~\.config\opencode\opencode.jsonc` is rejected by the repo’s installed 2.1.4 (`V2 permissions are not supported by OpenCode V1...`), and a separate isolated run reported `provider.quota` (`402 Insufficient balance`) — both account/config-side, not idboard. Use the isolated config to validate wiring; the board should receive the signed nonce. |
 | `opencode2` | same | duplicate | Same npm package/exe lineage as `opencode` on this machine. Not a second harness. |
 | `freebuff` 0.0.149 | none | **Not automatable** | Only `login`, `--continue`, `--cwd`; no prompt or one-shot mode. Would need a PTY driver. |
 | Antigravity | none | **Not automatable** | GUI IDE (`~/.gemini/antigravity`). No CLI harness surface. |
@@ -55,7 +55,11 @@ the board, never on the transcript.
 
 ```sh
 .\scripts\harness-smoke.ps1 -List                    # supported harnesses + resolved executables
-.\scripts\harness-smoke.ps1                          # opencode, default free model
+.\scripts\harness-smoke.ps1                          # opencode (user's normal config)
+# OpenCode rejects the user's normal config here, so validate with an isolated one:
+$env:XDG_CONFIG_HOME = "$env:TEMP\opencode-test-config"   # empty opencode.jsonc
+.\scripts\harness-smoke.ps1 -Harness opencode
+Remove-Item Env:\XDG_CONFIG_HOME
 .\scripts\harness-smoke.ps1 -Harness muse
 .\scripts\harness-smoke.ps1 -Model opencode/glm-5.3-flash-free
 .\scripts\harness-smoke.ps1 -HarnessBin C:\path\to\opencode.exe

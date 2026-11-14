@@ -82,7 +82,6 @@ if ($List) {
         Write-Host ("           path: {0}" -f $path)
         Write-Host ("           exec: {0}" -f $bin)
     }
-    Write-Host "warm: headless `warm -p` exists but needs login (not wired here)"
     exit 0
 }
 

@@ -17,7 +17,6 @@
 
       opencode   `opencode run --auto --format json "<prompt>"`   works
       muse       `muse exec --yolo "<prompt>"`                    works when configured
-      warm       `warm -p "<prompt>"`                             needs `warm login`
       freebuff   no headless mode                                 not automatable
       others     anything with a one-shot prompt mode             add an argv arm
 

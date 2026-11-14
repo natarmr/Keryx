@@ -9,7 +9,7 @@ This file records what has actually been measured on this machine, what is
 blocked and why, and how to add a harness. It is deliberately about the
 harnesses, not about idboard: the idboard side does not change per harness.
 
-Last measured: 2026-11-13, Windows, `opencode` v2.1.4, `muse` v1.4.18,
+Last measured: 2026-11-14, Windows, `opencode` v2.3.0, `muse` v1.4.18,
 `freebuff` v0.0.149.
 
 ## Two integration shapes
@@ -44,7 +44,7 @@ authorization input).
 | `opencode2` | same | duplicate | Same npm package/exe lineage as `opencode` on this machine. Not a second harness. |
 | `freebuff` 0.0.149 | none | **Not automatable** | Only `login`, `--continue`, `--cwd`; no prompt or one-shot mode. Would need a PTY driver. |
 | Antigravity | none | **Not automatable** | GUI IDE (`~/.gemini/antigravity`). No CLI harness surface. |
-| `claude`, `codex`, `gemini`, `copilot`, `warm` | — | **Absent** | Not installed on `PATH` on this machine (some config dirs may exist). Nothing to drive. |
+| `absent` | — | **Not installed** | Other CLIs such as `claude`, `codex`, `gemini` and `copilot` are not on `PATH` (some config dirs may exist). Nothing to drive. |
 
 A harness is *testable* here only if it has a non-interactive prompt mode **and**
 can run a shell command or speak MCP. Headless alone is not enough: a harness

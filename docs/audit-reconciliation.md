@@ -29,6 +29,35 @@ worker pool (`WORKERS = 4`, `QUEUE_DEPTH = 64`) rather than by the socket. That 
 a residual, not an open hole, and it is stated in `README.md` under "Deliberate
 limitations".
 
+## Windows listener DACL: reviewed, not changed
+
+This is the one security item that could plausibly be "finished" by adding a
+hand-built Windows security descriptor to the pipe listener. On the machine where
+`scripts/check-custody.ps1` was last run it **reports the standard-profile outcome**:
+the state root inherits full control for the owner, `SYSTEM` and `Administrators`,
+and no broader in-scope principal is visible. README "What idboard does *not*
+defend against" states that same-user processes are inside the boundary by design.
+
+Adding a descriptor now would be ~80 lines of `unsafe` Win32, a new platform
+dependency, and a new way for a listener to fail closed in a way operators would
+have to debug, while protecting against no additional account on this machine.
+That is the cost/benefit decision, not a claim that the pipe is authenticated.
+
+Decision: document the residual and leave the listener untouched. Re-open only
+after `scripts/check-custody.ps1 -IncludeSocket` on a machine whose creating token
+DACL demonstrably grants a broader in-boundary principal; then the implementation
+plan is explicit, not ad-hoc:
+
+1. Build `InitializeAcl`/`AddAccessAllowedAceEx` for the creating token's default
+   principals only, never `Everyone`.
+2. Apply it at socket creation in `idboard-ipc`, behind `listen_options`, with no
+   change to the daemon's authorisation logic.
+3. Pin `listener_custody_statement()` to the measured DACL, and keep
+   `check-custody-claims.ps1` green.
+
+If none of those three is true on the target machine, the change is wrong by
+construction.
+
 ## What the audit did not cover, and now exists
 
 The audit predates `idboard mcp`, `idboard inbox`, `idboard peers`, and

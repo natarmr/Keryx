@@ -202,6 +202,8 @@ keryx task reopen general <id>               # unstuck, return to the task pool
 keryx task abandon general <id>               # release your claim without done
 keryx task reclaim general <id>               # claim an existing task
 keryx task list general --all                 # oldest first; includes done and open
+keryx task list --stale 10m                   # only stale work (unclaimed-old or stalled claims)
+keryx replay --task <id>                      # one task's event trail across channels
 keryx console --brief                          # heartbeat-friendly one-line status
 keryx console --brief --watch                  # re-print the heartbeat until interrupted
 keryx console                                  # read-only local + board health view
@@ -217,6 +219,7 @@ keryx cursor general --set 0                    # or `--clear`, or just show
 keryx subscribe general --exit-on-json kind=task # structured trigger
 keryx peers --since 10m                      # only identities seen in the last 10m
 keryx doctor                                # config, keys, daemon health checks
+keryx doctor --strict                       # also fail on role-inheritance warnings (for CI)
 ```
 
 `inbox` is the one an agent should run first: it answers "what channels exist, what
@@ -250,7 +253,12 @@ Claims accept an optional `--lease` duration (`ms`/`s`/`m`/`h`/`d`, e.g. `10m`,
 `claimed_at_ms`); no envelope, daemon, or store change is involved. `task
 list`, `task next`, `focus`, and the console board summary compare the expiry
 against the read time, so an expired lease reads as unclaimed again. A claim
-without `--lease` never expires and keeps the previous behaviour.
+without `--lease` never expires and keeps the previous behaviour. `task list
+--stale <duration>` filters to stale work (unclaimed older than the duration, or
+claims stalled longer than it); `0s` matches everything open for scripted checks.
+The console board summary and `--brief` line report `leases_active` (plus
+`leases_expired` in JSON/text), and `replay --task <id>` reconstructs one task's
+event trail across channels.
 
 Cursor state is a local convenience, not part of the protocol. It lives
 under `$IDBOARD_HOME/cursors/<identity>.json`, carries only per-channel cursors,
@@ -274,9 +282,11 @@ claimed-by breakdown, last-message age, and recent messages. `--brief` collapses
 to one heartbeat-sized line and composes with `--watch`, which re-prints until
 interrupted. `--json` emits a stable `{ok, report_version: 1, checks, problems,
 board}` object where `board` always carries `identity`, `channels`, `tasks`
-(`open`, `claimed`, `done`, `claimed_by`, `oldest_unclaimed`), `last_message_age`,
-`last_message_age_ms`, and `recent` — with empty values when the board is
-unavailable outside a wrapper, so consumers can rely on the field layout.
+(`open`, `claimed`, `done`, `leases_active`, `leases_expired`, `claimed_by`,
+`oldest_unclaimed`), `last_message_age`, `last_message_age_ms`, and `recent` —
+with empty values when the board is unavailable outside a wrapper, so consumers
+can rely on the field layout. `doctor --strict` additionally fails on
+role-inheritance warnings, so CI can gate on them.
 
 `keryx admin` is the read-only operator group. `admin report` prints the local
 config's operator view — identities with roles, the channel ACL matrix including
@@ -582,9 +592,9 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 363 tests (361 pass, 2 `#[ignore]`d live-harness tests). 297 are unit tests over
+The suite is 370 tests (368 pass, 2 `#[ignore]`d live-harness tests). 301 are unit tests over
 the envelope, ACL matrix, storage, framing, the MCP server, and the wrapper's
-child environment. 66 are end-to-end (64 run by default): they spawn the real
+child environment. 69 are end-to-end (67 run by default): they spawn the real
 `keryx` and `keryxd` binaries, open real sockets, and attack the board with
 forged senders, replayed envelopes, tampered bodies, and signatures from the
 wrong key. Every rejection is asserted as a *specific* error code, never merely

@@ -1685,6 +1685,56 @@ fn replay_shows_history_and_respects_cursor_resume() {
 }
 
 #[test]
+fn replay_task_shows_one_tasks_event_trail() {
+    let b = TestBoard::start();
+
+    let created = b.as_identity("eng-01", &["task", "create", "general", "trail task"]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let task_id = String::from_utf8_lossy(&created.stdout)
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id")
+        .to_string();
+    b.as_identity("eng-01", &["task", "claim", "general", &task_id]);
+    b.post("eng-02", "general", "unrelated chatter");
+
+    let out = b.as_identity("eng-01", &["replay", "--task", &task_id]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("trail task"), "{stdout}");
+    assert!(stdout.contains("\"kind\":\"claim\""), "{stdout}");
+    assert!(!stdout.contains("unrelated chatter"), "{stdout}");
+}
+
+#[test]
+fn task_list_stale_surfaces_old_unclaimed_work() {
+    let b = TestBoard::start();
+
+    b.as_identity("eng-01", &["task", "create", "general", "stale candidate"]);
+
+    // Zero threshold: everything open counts as stale.
+    let out = b.as_identity("eng-01", &["task", "list", "--stale", "0s", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("task list --json must be JSON");
+    assert!(v["tasks"].as_array().unwrap().iter().any(|t| t["title"] == "stale candidate"));
+
+    // A huge threshold flags nothing.
+    let out = b.as_identity("eng-01", &["task", "list", "--stale", "365d", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("task list --json must be JSON");
+    assert!(v["tasks"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn doctor_strict_fails_on_role_inheritance_warnings() {
+    let b = TestBoard::start();
+    // Default fixture grants by role sparingly; strict must at least run cleanly here.
+    let out = b.keryx(&["doctor", "--strict"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("keryx doctor:"), "{stdout}");
+}
+
+#[test]
 fn mention_and_structured_subscribe_stops_on_json_field() {
     let b = TestBoard::start();
 

@@ -209,6 +209,9 @@ enum Command {
     Replay {
         /// Optional channel. Defaults to every readable channel.
         channel: Option<String>,
+        /// Only messages belonging to this task id (its create/claim/done trail).
+        #[arg(long, value_name = "TASK_ID")]
+        task: Option<String>,
         /// Start from saved local cursors.
         #[arg(long)]
         since_last: bool,
@@ -250,7 +253,11 @@ enum Command {
     },
 
     /// Check the local keryx installation and report problems.
-    Doctor,
+    Doctor {
+        /// Also fail on operator warnings (e.g. role-inheritance grants).
+        #[arg(long)]
+        strict: bool,
+    },
 
     /// Substring search over message bodies across readable channels.
     Search {
@@ -437,6 +444,11 @@ enum TaskCommand {
         /// Show only tasks this process created or claims.
         #[arg(long)]
         mine: bool,
+        /// Show only stale tasks: unclaimed tasks older than the duration, or
+        /// claims stalled longer than it. E.g. `--stale 10m`. `0s` matches
+        /// everything open, which is useful for scripted checks.
+        #[arg(long, value_name = "DURATION")]
+        stale: Option<String>,
     },
 }
 
@@ -517,8 +529,8 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Command::Web { bind, once } => cmd_web(json, &bind, once),
         Command::Focus { limit } => cmd_focus(json, limit),
         Command::Next => cmd_task(json, Some(TaskCommand::Next { channel: None })),
-        Command::Replay { channel, since_last, since, limit, save_cursor } => {
-            cmd_replay(json, channel.as_deref(), since, since_last, limit, save_cursor)
+        Command::Replay { channel, task, since_last, since, limit, save_cursor } => {
+            cmd_replay(json, channel.as_deref(), task.as_deref(), since, since_last, limit, save_cursor)
         }
         Command::Mention { identity, body, channel } => {
             validate_identity(&identity)?;
@@ -561,7 +573,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Command::Peers { since, watch, watch_interval_ms } => {
             cmd_peers(json, since.as_deref(), watch, watch_interval_ms)
         }
-        Command::Doctor => cmd_doctor(json),
+        Command::Doctor { strict } => cmd_doctor(json, strict),
         Command::Admin { command } => cmd_admin(json, command),
         Command::Search { query, channel, limit } => {
             cmd_search(json, &query, channel.as_deref(), limit)
@@ -957,6 +969,9 @@ You are running as the keryx identity `{name}`.
 - `keryx replay <channel> [--since-last] [--save-cursor] [--limit N]` reconstructs
   a readable backlog for the current state without reading every byte of history.
 - `keryx console --brief` prints a single-line status for heartbeat prompts.
+- `keryx task list [--stale 10m] [--mine]` narrows the list to stale work.
+- `keryx replay --task <id>` shows one task's event trail across channels.
+- `keryx doctor --strict` additionally fails on role-inheritance warnings (for CI).
 - `keryx console` is a local read-only status view (checks + board summary when inside a wrapper).
 - `keryx console --brief` prints a one-line status suitable for heartbeat prompts.
 - `keryx web` serves that same read-only board view on loopback; the URL carries an ephemeral token.
@@ -966,6 +981,9 @@ You are running as the keryx identity `{name}`.
 - `keryx next` is a shortcut for `keryx task next`.
 - `keryx task create <channel> \"<title>\"` / `claim` / `done` / `list` coordinate
   work without changing the protocol; task messages are plain signed messages.
+- `keryx task list [--stale 10m] [--mine]` narrows the list to stale work.
+- `keryx replay --task <id>` shows one task's event trail across channels.
+- `keryx doctor --strict` additionally fails on role-inheritance warnings (for CI).
 - `keryx whoami` confirms which identity you are.
 - `keryx peers --since 10m` narrows that roster to identities seen recently;
   `keryx peers --watch` refreshes it. Presence is diagnostic only: a peer
@@ -1544,7 +1562,7 @@ struct TaskView {
 }
 
 fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
-    let command = command.unwrap_or(TaskCommand::List { channel: None, open: true, all: false, mine: false });
+    let command = command.unwrap_or(TaskCommand::List { channel: None, open: true, all: false, mine: false, stale: None });
     match command {
         TaskCommand::Create { channel, title, body } => {
             validate_channel(&channel)?;
@@ -1624,10 +1642,11 @@ fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
             let body = serde_json::json!({ "v": 1, "id": task_id, "kind": "reclaim" });
             cmd_post(json, &channel, &format!("task:{}", body), Provenance::SelfOriginated)
         }
-        TaskCommand::List { channel, open: _, all, mine } => {
+        TaskCommand::List { channel, open: _, all, mine, stale } => {
             if channel.as_ref().is_some_and(|channel| validate_channel(channel).is_err()) {
                 return Err(idboard_core::error::CoreError::bad_request("invalid channel"));
             }
+            let stale_ms = stale.as_deref().map(parse_watch_duration_ms).transpose()?;
             let client = RelayClient::from_env()?;
             let channels = match channel {
                 Some(channel) => vec![channel],
@@ -1640,6 +1659,14 @@ fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
             if mine {
                 records.retain(|record| {
                     record.view.created_by == identity || record.view.claimed_by.as_deref() == Some(identity.as_str())
+                });
+            }
+            if let Some(threshold) = stale_ms {
+                let now_ms = idboard_core::now_ms();
+                records.retain(|record| {
+                    let claimed = record.view.claimed_by.is_some();
+                    is_unclaimed_stale(record.created_at_ms, record.view.done, claimed, now_ms, threshold)
+                        || is_claim_stalled(record.claimed_at_ms, claimed, record.view.done, now_ms, threshold)
                 });
             }
             if json {
@@ -1900,8 +1927,21 @@ fn summarize_doctor_checks(checks: &[serde_json::Value]) -> (Vec<serde_json::Val
     (problems, ok)
 }
 
-fn cmd_doctor(json: bool) -> Result<i32> {
-    let checks = collect_doctor_checks();
+/// `strict` additionally fails on operator warnings (role-inheritance
+/// grants), so CI can gate on them. Without it, warnings are informational.
+fn cmd_doctor(json: bool, strict: bool) -> Result<i32> {
+    let mut checks = collect_doctor_checks();
+    let mut warnings: Vec<String> = Vec::new();
+    if strict {
+        // Role warnings need the config; collect_doctor_checks already loaded
+        // it for the `config` check, so re-load is cheap and keeps this pure.
+        if let Ok(config) = idboard_acl::Config::load(&layout::config_path()) {
+            warnings = config.role_inheritance_warnings();
+            for warning in &warnings {
+                checks.push(serde_json::json!({ "name": "role-warning", "ok": false, "detail": warning }));
+            }
+        }
+    }
     let (problems, ok) = summarize_doctor_checks(&checks);
     if json {
         println!("{}", serde_json::json!({
@@ -2177,13 +2217,14 @@ fn brief_line(ok: bool, board: &serde_json::Value) -> String {
         return format!("STATE={} board=unavailable", if ok { "ok" } else { "attention" });
     }
     format!(
-        "STATE={} board=ok identity={} channels={} tasks_open={} tasks_claimed={} tasks_done={} last_age={}",
+        "STATE={} board=ok identity={} channels={} tasks_open={} tasks_claimed={} tasks_done={} leases_active={} last_age={}",
         if ok { "ok" } else { "attention" },
         board["identity"].as_str().unwrap_or("unknown"),
         board["channels"].as_array().map(|c| c.len()).unwrap_or(0),
         board["tasks"]["open"].as_u64().unwrap_or(0),
         board["tasks"]["claimed"].as_u64().unwrap_or(0),
         board["tasks"]["done"].as_u64().unwrap_or(0),
+        board["tasks"]["leases_active"].as_u64().unwrap_or(0),
         board["last_message_age"].as_str().unwrap_or("never")
     )
 }
@@ -2222,10 +2263,12 @@ fn cmd_console(json: bool, limit: u32, brief: bool, watch: bool, watch_interval_
                 println!("  channels: {}", board["channels"].as_array().map(|c| c.len()).unwrap_or(0));
                 println!("  last message: {}", board["last_message_age"].as_str().unwrap_or("never"));
                 println!(
-                    "  tasks: {} open, {} claimed, {} done",
+                    "  tasks: {} open, {} claimed, {} done ({} active leases, {} expired)",
                     board["tasks"]["open"].as_u64().unwrap_or(0),
                     board["tasks"]["claimed"].as_u64().unwrap_or(0),
-                    board["tasks"]["done"].as_u64().unwrap_or(0)
+                    board["tasks"]["done"].as_u64().unwrap_or(0),
+                    board["tasks"]["leases_active"].as_u64().unwrap_or(0),
+                    board["tasks"]["leases_expired"].as_u64().unwrap_or(0)
                 );
                 let claimed_by = board["tasks"]["claimed_by"]
                     .as_object()
@@ -2358,11 +2401,17 @@ fn truncate_to_last<T>(mut messages: Vec<T>, per_channel: usize) -> Vec<T> {
 fn cmd_replay(
     json: bool,
     channel: Option<&str>,
+    task: Option<&str>,
     since: Option<i64>,
     since_last: bool,
     limit: Option<u32>,
     save_cursor: bool,
 ) -> Result<i32> {
+    if task.is_some() && (since_last || save_cursor || since.is_some()) {
+        return Err(idboard_core::error::CoreError::bad_request(
+            "--task selects the task's own event trail; combine it only with --limit",
+        ));
+    }
     if channel.is_some() && (since_last || save_cursor || since.is_none()) {
         // A single channel can still use --since-last/--save-cursor; the
         // condition is documentation only, not a constraint.
@@ -2404,7 +2453,13 @@ fn cmd_replay(
             0
         };
         let res = client.read(&channel, start, 1000)?;
-        let messages: Vec<_> = truncate_to_last(res.messages.into_iter().collect(), per_channel);
+        let mut messages: Vec<_> = res.messages.into_iter().collect();
+        if let Some(task_id) = task {
+            messages.retain(|message| {
+                parse_task_event(&message.envelope.body).is_some_and(|event| event.id == task_id)
+            });
+        }
+        let messages: Vec<_> = truncate_to_last(messages, per_channel);
         let final_cursor = messages.last().map(|message| message.cursor).unwrap_or(start);
         if let Some(store) = store.as_mut() {
             if save_cursor {
@@ -2678,6 +2733,8 @@ fn board_summary(limit: u32) -> serde_json::Value {
     let mut task_open = 0;
     let mut task_claimed = 0;
     let mut task_done = 0;
+    let mut leases_active: u64 = 0;
+    let mut leases_expired: u64 = 0;
     let mut oldest_unclaimed: Option<(i64, TaskRecord)> = None;
     let mut claimed_by_identity: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     for digest in &channels {
@@ -2686,6 +2743,15 @@ fn board_summary(limit: u32) -> serde_json::Value {
         }
         if let Ok(tasks) = load_channel_tasks(&client, &digest.channel) {
             for record in tasks {
+                // Leases are evaluated at read time: an expired lease reads as
+                // unclaimed, so it still counts as expired lease activity.
+                if record.view.lease_expires_at_ms.is_some() {
+                    if record.view.claimed_by.is_some() {
+                        leases_active += 1;
+                    } else if !record.view.done {
+                        leases_expired += 1;
+                    }
+                }
                 if record.view.done {
                     task_done += 1;
                 } else if let Some(claimant) = &record.view.claimed_by {
@@ -2740,6 +2806,8 @@ fn board_summary(limit: u32) -> serde_json::Value {
             "open": task_open,
             "claimed": task_claimed,
             "done": task_done,
+            "leases_active": leases_active,
+            "leases_expired": leases_expired,
             "claimed_by": serde_json::Value::Object(claimed_summary.into_iter().map(|(k, v)| (k, serde_json::json!(v))).collect()),
             "oldest_unclaimed": oldest_unclaimed,
         },
@@ -2942,6 +3010,7 @@ footer { padding: 18px 28px 28px; color: var(--muted); font-size: 12px; border-t
     <div class="panel" id="tasks-panel">
       <h2>Tasks</h2>
       <div id="tasks-summary" class="statusline"><span class="muted">waiting for board data…</span></div>
+      <div id="tasks-leases" class="mono muted" style="margin-top:8px"></div>
       <div id="tasks-by-identity" class="mono muted" style="margin-top:12px"></div>
     </div>
   </section>
@@ -2999,6 +3068,7 @@ async function refresh() {
     ? `oldest unclaimed task: ${oldest.id} — ${oldest.title} (${oldest.channel})`
     : 'no unclaimed tasks');
   const by = board.tasks?.claimed_by || {};
+  setText('tasks-leases', `leases: ${board.tasks?.leases_active ?? 0} active, ${board.tasks?.leases_expired ?? 0} expired`);
   document.getElementById('tasks-by-identity').textContent =
     Object.keys(by).length
       ? Object.entries(by).map(([who, n]) => `${who}: ${n} claimed`).join(' · ')
@@ -3302,6 +3372,7 @@ mod tests {
         let line = brief_line(true, &board);
         assert!(line.contains("STATE=ok"), "{line}");
         assert!(line.contains("tasks_open=1"), "{line}");
+        assert!(line.contains("leases_active="), "{line}");
         assert!(line.contains("last_age="), "{line}");
         let line = brief_line(false, &down);
         assert_eq!(line, "STATE=attention board=unavailable");
@@ -3349,12 +3420,68 @@ mod tests {
         // The operator cards the track adds: claimed-by breakdown,
         // oldest-unclaimed, and last-message age. The data already rides in
         // `board_summary`; the page must actually render it.
-        for needle in ["tasks-by-identity", "tasks-summary", "board-age", "last message:"] {
+        for needle in ["tasks-by-identity", "tasks-leases", "tasks-summary", "board-age", "last message:"] {
             assert!(WEB_HTML.contains(needle), "dashboard is missing {needle}");
         }
         let html = response_for_request("GET /t/ HTTP/1.1\r\n\r\n", "t", 5);
         let body = String::from_utf8(html.2).unwrap();
         assert!(body.contains("board-age"), "{body}");
+    }
+
+    #[test]
+    fn task_list_accepts_a_stale_window_and_doctor_accepts_strict() {
+        let cli = Cli::try_parse_from(["keryx", "task", "list", "--stale", "10m", "--mine"]).unwrap();
+        match cli.command {
+            Command::Task { command } => match command.expect("list subcommand") {
+                TaskCommand::List { stale, mine, .. } => {
+                    assert!(mine);
+                    assert_eq!(stale.as_deref(), Some("10m"));
+                    assert_eq!(parse_duration_ms(stale.as_deref().unwrap()).unwrap(), 600_000);
+                }
+                other => panic!("unexpected task {other:?}"),
+            },
+            other => panic!("unexpected {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["keryx", "doctor", "--strict"]).unwrap();
+        assert!(matches!(cli.command, Command::Doctor { strict: true }));
+        let cli = Cli::try_parse_from(["keryx", "replay", "--task", "t-1"]).unwrap();
+        match cli.command {
+            Command::Replay { task, .. } => assert_eq!(task.as_deref(), Some("t-1")),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_event_filter_selects_one_tasks_trail() {
+        use idboard_core::wire::StoredMessage;
+        let make = |id: &str, kind: &str, cursor: i64| StoredMessage {
+            cursor,
+            envelope: idboard_core::Envelope {
+                op: idboard_core::envelope::Op::Post,
+                sender_id: "eng-01".into(),
+                sender_pubkey_fp: "00".into(),
+                channel: "general".into(),
+                body: format!("task:{{\"v\":1,\"id\":\"{id}\",\"kind\":\"{kind}\"}}"),
+                provenance: idboard_core::Provenance::SelfOriginated,
+                seq: cursor,
+                timestamp: cursor,
+                nonce: String::new(),
+                signature: String::new(),
+            },
+        };
+        let messages = vec![
+            make("t-1", "create", 1),
+            make("t-2", "create", 2),
+            make("t-1", "claim", 3),
+        ];
+        let trail: Vec<_> = messages
+            .iter()
+            .filter(|message| {
+                parse_task_event(&message.envelope.body).is_some_and(|event| event.id == "t-1")
+            })
+            .collect();
+        assert_eq!(trail.len(), 2);
+        assert!(trail.iter().all(|message| message.envelope.body.contains("\"t-1\"")));
     }
 
     #[test]

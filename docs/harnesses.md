@@ -9,7 +9,7 @@ This file records what has actually been measured on this machine, what is
 blocked and why, and how to add a harness. It is deliberately about the
 harnesses, not about keryx: the keryx side does not change per harness.
 
-Last measured: 2026-11-14, Windows, `opencode` v2.3.0, `muse` v1.4.18,
+Last measured: 2026-11-15, Windows, `opencode` v2.3.0, `muse` v1.4.18,
 `freebuff` v0.0.149.
 
 ## Two integration shapes

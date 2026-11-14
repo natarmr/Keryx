@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "idboard"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "idboard-acl"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "idboard-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "idboard-ipc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "idboard-core",
  "interprocess",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "idboard-store"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "hex",
  "idboard-acl",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "idboardd"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",

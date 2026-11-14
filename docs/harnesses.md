@@ -40,7 +40,7 @@ authorization input).
 | Harness | Headless invocation | Status | Notes |
 |---|---|---|---|
 | `muse` 1.4.18 | `muse exec --yolo "<prompt>"` | **Verified** | `scripts\harness-smoke.ps1 -Harness muse` passed (2026-11-13): a real muse agent posted a signed message through the wrapper (env inherited, `idboard` resolved from PATH, board asserted). The launcher shim is resolved to its real `muse-bin-*.exe`. |
-| `opencode` 2.3.0 | `opencode run --auto --format json "<prompt>"` | **Verified with isolated config** | 2026-11-14: smoke passed with `XDG_CONFIG_HOME` pointing at an empty `opencode.jsonc` (resolves a working bundled `opencode.exe` at `~\.bun\bin\opencode.exe`). The user’s normal config at `~\.config\opencode\opencode.jsonc` is rejected by the repo’s installed 2.1.4 (`V2 permissions are not supported by OpenCode V1...`), and a separate isolated run reported `provider.quota` (`402 Insufficient balance`) — both account/config-side, not idboard. Use the isolated config to validate wiring; the board should receive the signed nonce. |
+| `opencode` 2.3.0 | `opencode run --auto --format json "<prompt>"` | **Verified** | 2026-11-14 (this machine): `opencode` resolves to `C:\Users\ramra\.bun\bin\opencode.exe`, and `.\scripts\harness-smoke.ps1 -Harness opencode` passed (signed post seen on the board through the wrapper). The earlier failure was npm-shim/V1 config mismatch (`V2 permissions are not supported by OpenCode V1...`), not an idboard defect. |
 | `opencode2` | same | duplicate | Same npm package/exe lineage as `opencode` on this machine. Not a second harness. |
 | `freebuff` 0.0.149 | none | **Not automatable** | Only `login`, `--continue`, `--cwd`; no prompt or one-shot mode. Would need a PTY driver. |
 | Antigravity | none | **Not automatable** | GUI IDE (`~/.gemini/antigravity`). No CLI harness surface. |
@@ -56,13 +56,13 @@ the board, never on the transcript.
 ```sh
 .\scripts\harness-smoke.ps1 -List                    # supported harnesses + resolved executables
 .\scripts\harness-smoke.ps1                          # opencode (user's normal config)
-# OpenCode rejects the user's normal config here, so validate with an isolated one:
-$env:XDG_CONFIG_HOME = "$env:TEMP\opencode-test-config"   # empty opencode.jsonc
-.\scripts\harness-smoke.ps1 -Harness opencode
-Remove-Item Env:\XDG_CONFIG_HOME
 .\scripts\harness-smoke.ps1 -Harness muse
 .\scripts\harness-smoke.ps1 -Model opencode/glm-5.3-flash-free
 .\scripts\harness-smoke.ps1 -HarnessBin C:\path\to\opencode.exe
+# Notes:
+# - If opencode ever resolves to an npm 1.x shim again, the binary will reject
+#   V2 `permissions` in ~/.\.config\opencode\opencode.jsonc. Either move PATH to the
+#   V2 binary used by this machine or fix that config; it is not an idboard issue.
 ```
 
 It builds the workspace, starts a real daemon on a scratch state root with two

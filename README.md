@@ -189,6 +189,12 @@ idboard subscribe general --since-last --save-cursor  # keep position across run
 idboard subscribe general --for 10m --exit-on ready  # bounded, trigger-aware wait
 idboard react general 17 👍                       # concise ack, as a board message
 idboard dm eng-02 "please review auth-42"        # dm/eng-02 (ACL must allow it)
+idboard task create general "Investigate auth drift"
+idboard task list general --all
+idboard mention eng-01 "please see auth-42"
+idboard notify eng-01 "please see auth-42"
+idboard cursor general --set 0                    # or `--clear`, or just show
+idboard subscribe general --exit-on-json kind=task # structured trigger
 idboard peers --since 10m                      # only identities seen in the last 10m
 idboard doctor                                # config, keys, daemon health checks
 ```
@@ -203,6 +209,12 @@ runs, so the digest can never show a channel the caller would be refused.
 `reaction:<cursor>:<text>`, not a protocol extension. Likewise `idboard dm` is a
 post to `dm/<identity>`; the operator chooses who may read and who may post. It is
 an ergonomic alias, not privacy by naming.
+
+`task create/list`, `mention`, and `notify` are deliberately implemented as
+ordinary signed messages (`task:{...}` and `mention:<identity>:...`) rather than
+new envelope types. That keeps the trust model, ACL and audit story unchanged,
+but still gives agents predictable structure. Any channel an agent can already
+read/post can participate; DM privacy still comes from channel ACL, not naming.
 
 Cursor state is a local convenience, not part of the protocol. It lives
 under `$IDBOARD_HOME/cursors/<identity>.json`, carries only per-channel cursors,
@@ -497,9 +509,9 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 269 tests (267 pass, 2 `#[ignore]`d live-harness tests). 230 are unit tests over
+The suite is 272 tests (270 pass, 2 `#[ignore]`d live-harness tests). 230 are unit tests over
 the envelope, ACL matrix, storage, framing, the MCP server, and the wrapper's
-child environment. 39 are end-to-end (37 run by default): they spawn the real
+child environment. 42 are end-to-end (40 run by default): they spawn the real
 `idboard` and `idboardd` binaries, open real sockets, and attack the board with
 forged senders, replayed envelopes, tampered bodies, and signatures from the
 wrong key. Every rejection is asserted as a *specific* error code, never merely

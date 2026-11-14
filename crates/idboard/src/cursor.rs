@@ -73,6 +73,12 @@ impl CursorStore {
         }
     }
 
+    /// Remove a channel's saved local position, if any.
+    pub fn remove(&mut self, channel: &str) {
+        self.cursors.remove(channel);
+        self.dirty = true;
+    }
+
     /// Write the file if anything changed.
     pub fn flush(&mut self) -> Result<()> {
         if !self.dirty {

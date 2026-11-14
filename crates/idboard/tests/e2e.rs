@@ -1487,6 +1487,75 @@ fn inbox_and_peers_are_inert_outside_a_wrapper() {
 }
 
 #[test]
+fn task_create_claim_done_and_list_use_plain_board_messages() {
+    let b = TestBoard::start();
+
+    let out = b.as_identity("eng-01", &["task", "create", "general", "Investigate auth drift"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let posted = String::from_utf8_lossy(&out.stdout);
+    let task_id = posted
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id is printed in the confirmation")
+        .trim_end_matches(['\n', '"'])
+        .to_string();
+
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    assert!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("task list --json must be JSON");
+    assert!(v["tasks"].as_array().unwrap().iter().any(|t| t["title"] == "Investigate auth drift"));
+    assert_eq!(v["tasks"][0]["done"], false);
+
+    let claimed = b.as_identity("eng-01", &["task", "claim", "general", &task_id]);
+    assert!(claimed.status.success(), "{}", String::from_utf8_lossy(&claimed.stderr));
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--mine", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert!(v["tasks"].as_array().unwrap().iter().any(|t| t["claimed_by"] == "eng-01"));
+
+    let done = b.as_identity("eng-01", &["task", "done", "general", &task_id]);
+    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--all", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert!(v["tasks"].as_array().unwrap().iter().any(|t| t["done"] == true));
+}
+
+#[test]
+fn mention_and_structured_subscribe_stops_on_json_field() {
+    let b = TestBoard::start();
+
+    let out = b.as_identity("eng-01", &["mention", "eng-02", "please review auth-42"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let out = b.as_identity("eng-02", &["post", "general", r#"{"kind":"done","id":"x"}"#]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let out = b.as_identity(
+        "eng-01",
+        &["subscribe", "general", "--since", "0", "--exit-on-json", "kind=done"],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("\"kind\":\"done\""), "{stdout}");
+}
+
+#[test]
+fn cursor_commands_round_trip_a_saved_position() {
+    let b = TestBoard::start();
+    b.post("eng-01", "general", "for cursor commands");
+
+    let set = b.as_identity("eng-01", &["cursor", "general", "--set", "1"]);
+    assert!(set.status.success(), "{}", String::from_utf8_lossy(&set.stderr));
+
+    let show = b.as_identity("eng-01", &["cursor", "general"]);
+    let stdout = String::from_utf8_lossy(&show.stdout);
+    assert!(show.status.success(), "{}", String::from_utf8_lossy(&show.stderr));
+    assert!(stdout.contains("cursor[general] = 1"), "{stdout}");
+
+    let clear = b.as_identity("eng-01", &["cursor", "general", "--clear"]);
+    assert!(clear.status.success(), "{}", String::from_utf8_lossy(&clear.stderr));
+}
+
+#[test]
 fn saving_and_resuming_a_cursor_is_idempotent() {
     let b = TestBoard::start();
     let out = b.post("eng-01", "general", "resume this cursor");

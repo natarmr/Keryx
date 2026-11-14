@@ -84,6 +84,10 @@ enum Command {
         /// Stop after printing a message containing this text.
         #[arg(long)]
         exit_on: Option<String>,
+        /// Stop after a top-level JSON message field matches `KEY=value`.
+        /// Example: `--exit-on-json kind=done`.
+        #[arg(long)]
+        exit_on_json: Option<String>,
         /// Stop after this many messages. Useful for scripted checks.
         #[arg(long)]
         count: Option<u64>,
@@ -136,6 +140,37 @@ enum Command {
         /// Short reaction text, e.g. a word or emoji.
         reaction: String,
     },
+    /// Cooperative task messages on a shared channel.
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
+
+    /// Mention an identity in a channel, with unambiguous markup.
+    Mention {
+        identity: String,
+        body: String,
+        /// Channel to post to. Defaults to `general`.
+        #[arg(long, default_value = "general")]
+        channel: String,
+    },
+
+    /// Notify an identity by posting to its `dm/<identity>` channel.
+    Notify {
+        identity: String,
+        body: String,
+    },
+
+    /// Show, clear or set a saved local channel cursor.
+    Cursor {
+        channel: String,
+        /// Remove this channel's saved local position.
+        #[arg(long)]
+        clear: bool,
+        /// Set this channel's saved local position.
+        #[arg(long)]
+        set: Option<i64>,
+    },
 
     /// Check the local idboard installation and report problems.
     Doctor,
@@ -179,6 +214,43 @@ struct RunArgs {
     /// Command to run, after `--`.
     #[arg(last = true, required = true)]
     command: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum TaskCommand {
+    /// Create a task in a channel.
+    Create {
+        /// Channel task messages are posted to.
+        channel: String,
+        /// Short task title.
+        title: String,
+        /// Optional longer description, included in the create message.
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// Claim an open task.
+    Claim {
+        channel: String,
+        task_id: String,
+    },
+    /// Mark an existing task as done.
+    Done {
+        channel: String,
+        task_id: String,
+    },
+    /// List task state reconstructed from signed messages.
+    List {
+        channel: String,
+        /// Show only tasks not marked done. This is the default.
+        #[arg(long)]
+        open: bool,
+        /// Show every task, including done ones.
+        #[arg(long)]
+        all: bool,
+        /// Show only tasks this process created or claims.
+        #[arg(long)]
+        mine: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -242,8 +314,8 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Command::Read { channel, since, since_last, save_cursor, limit } => {
             cmd_read(json, &channel, since, since_last, save_cursor, limit)
         }
-        Command::Subscribe { channel, interval_ms, since, since_last, save_cursor, for_, exit_on, count } => {
-            cmd_subscribe(json, &channel, interval_ms, since, since_last, save_cursor, for_.as_deref(), exit_on.as_deref(), count)
+        Command::Subscribe { channel, interval_ms, since, since_last, save_cursor, for_, exit_on, exit_on_json, count } => {
+            cmd_subscribe(json, &channel, interval_ms, since, since_last, save_cursor, for_.as_deref(), exit_on.as_deref(), exit_on_json.as_deref(), count)
         }
         Command::Dm { identity, body, body_file, provenance } => {
             let channel = format!("dm/{identity}");
@@ -251,6 +323,28 @@ fn dispatch(cli: Cli) -> Result<i32> {
             let body = read_body(body.as_deref(), body_file.as_deref())?;
             cmd_post(json, &channel, &body, provenance.into())
         }
+        Command::Task { command } => cmd_task(json, command),
+        Command::Mention { identity, body, channel } => {
+            validate_identity(&identity)?;
+            validate_channel(&channel)?;
+            if body.len() > idboard_core::MAX_BODY_LEN.saturating_sub("mention:eng-01: ".len()) {
+                return Err(idboard_core::error::CoreError::bad_request(format!(
+                    "body is too large for the mention wrapper ({} bytes); use a normal post",
+                    body.len()
+                )));
+            }
+            cmd_post(json, &channel, &format!("mention:{identity}:{body}"), Provenance::SelfOriginated)
+        }
+        Command::Notify { identity, body } => {
+            validate_identity(&identity)?;
+            let channel = format!("dm/{identity}");
+            validate_channel(&channel)?;
+            if body.len() > idboard_core::MAX_BODY_LEN {
+                return Err(idboard_core::error::CoreError::bad_request("body is too large"));
+            }
+            cmd_post(json, &channel, &body, Provenance::SelfOriginated)
+        }
+        Command::Cursor { channel, clear, set } => cmd_cursor(json, &channel, clear, set),
         Command::React { channel, cursor, reaction } => {
             if cursor <= 0 {
                 return Err(idboard_core::error::CoreError::bad_request("reaction cursor must be positive"));
@@ -416,6 +510,7 @@ fn cmd_subscribe(
     save_cursor: bool,
     for_: Option<&str>,
     exit_on: Option<&str>,
+    exit_on_json: Option<&str>,
     count: Option<u64>,
 ) -> Result<i32> {
     validate_channel(channel)?;
@@ -436,6 +531,7 @@ fn cmd_subscribe(
             .unwrap_or(0),
     };
     let deadline = for_.map(parse_duration_ms).transpose()?.map(|ms| Instant::now() + Duration::from_millis(ms));
+    let exit_on_json = exit_on_json.map(parse_exit_on_json).transpose()?;
     let mut seen: u64 = 0;
 
     loop {
@@ -470,6 +566,12 @@ fn cmd_subscribe(
                 }
                 return Ok(0);
             }
+            if exit_on_json.as_ref().is_some_and(|(key, value)| json_message_matches(&m.envelope.body, key, value)) {
+                if let Some(mut store) = store {
+                    store.flush()?;
+                }
+                return Ok(0);
+            }
             if let Some(limit) = count {
                 if seen >= limit {
                     if let Some(mut store) = store {
@@ -490,9 +592,28 @@ fn cmd_subscribe(
     }
 }
 
-/// The instructions to paste into an agent, or the two commands that wire a
-/// harness up. Printed rather than stored so the README has one source and the
-/// wording cannot drift between docs and the binary.
+fn parse_exit_on_json(input: &str) -> Result<(String, serde_json::Value)> {
+    let (key, expected) = input
+        .split_once('=')
+        .ok_or_else(|| idboard_core::error::CoreError::bad_request("use --exit-on-json KEY=value, e.g. kind=task"))?;
+    let key = key.trim();
+    let expected = expected.trim();
+    if key.is_empty() || expected.is_empty() {
+        return Err(idboard_core::error::CoreError::bad_request("--exit-on-json requires a non-empty KEY and value"));
+    }
+    // Unquoted values that look like JSON are parsed as JSON; otherwise they are strings.
+    let value = serde_json::from_str(expected).unwrap_or_else(|_| serde_json::Value::String(expected.to_string()));
+    Ok((key.to_string(), value))
+}
+
+fn json_message_matches(body: &str, key: &str, expected: &serde_json::Value) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    value.get(key) == Some(expected)
+}
+
+
 fn cmd_instructions(json: bool, harness: HarnessArg, identity: Option<&str>) -> Result<i32> {
     if let Some(name) = identity {
         validate_identity(name)?;
@@ -524,11 +645,17 @@ You are running as the idboard identity `{name}`.
 - `idboard post <channel> --body-file <path>` sends a multi-line body (`-` reads stdin).
 - `idboard read <channel> --since <cursor> --json` reads; the reply carries the
   `cursor` to pass as `--since` next time. `--since-last` resumes from a saved
-  local position per channel; `--save-cursor` updates it.
+  local position per channel; `--save-cursor` updates it. `idboard cursor <channel>`
+  shows, sets, or clears that saved local position.
 - `idboard subscribe <channel>` watches a channel and prints messages as they arrive
-  (`--for 10m` to bound the run, `--exit-on <text>` to stop on a trigger).
+  (`--for 10m` to bound the run, `--exit-on <text>` to stop on a trigger,
+  `--exit-on-json kind=done` to stop on a structured body).
 - `idboard react <channel> <cursor> <reaction>` posts a lightweight reaction message.
 - `idboard dm <identity> \"<message>\"` posts to `dm/<identity>` (ACL decides who can read).
+- `idboard mention <identity> \"<message>\"` posts `mention:<identity>:...` for agents to detect.
+- `idboard notify <identity> \"<message>\"` is a concise alias for a direct-message post.
+- `idboard task create <channel> \"<title>\"` / `claim` / `done` / `list` coordinate
+  work without changing the protocol; task messages are plain signed messages.
 - `idboard whoami` confirms which identity you are.
 - `idboard peers --since 10m` narrows that roster to identities seen recently;
   `idboard peers --watch` refreshes it. Presence is diagnostic only: a peer
@@ -720,7 +847,207 @@ fn last_seen_label(now_ms: i64, last_seen_ms: i64) -> String {
     format!("seen {label}")
 }
 
-/// A read-only health report for one local installation.
+/// Show or manage this process' saved local cursor for a channel.
+///
+/// Read-only parts of the operation never touch the relay; mutating parts only
+/// update the local file. Nothing here is consulted by the daemon.
+fn cmd_cursor(json: bool, channel: &str, clear: bool, set: Option<i64>) -> Result<i32> {
+    validate_channel(channel)?;
+    if clear && set.is_some() {
+        return Err(idboard_core::error::CoreError::bad_request("pass either --clear or --set, not both"));
+    }
+    if let Some(cursor) = set {
+        if cursor < 0 {
+            return Err(idboard_core::error::CoreError::bad_request("cursor must be non-negative"));
+        }
+        let identity = RelayClient::from_env()?.whoami()?.identity;
+        let mut store = CursorStore::for_identity(&identity)?;
+        store.set(channel, cursor);
+        store.flush()?;
+        if json {
+            println!("{}", serde_json::json!({ "channel": channel, "cursor": cursor, "cleared": false }));
+        } else {
+            println!("cursor[{channel}] set to {cursor}");
+        }
+        return Ok(0);
+    }
+    if clear {
+        let identity = RelayClient::from_env()?.whoami()?.identity;
+        let mut store = CursorStore::for_identity(&identity)?;
+        store.remove(channel);
+        store.flush()?;
+        if json {
+            println!("{}", serde_json::json!({ "channel": channel, "cleared": true }));
+        } else {
+            println!("cursor[{channel}] cleared");
+        }
+        return Ok(0);
+    }
+
+    let identity = RelayClient::from_env()?.whoami()?.identity;
+    match CursorStore::for_identity(&identity) {
+        Ok(store) => {
+            let cursor = store.get(channel);
+            if json {
+                println!("{}", serde_json::json!({ "ok": true, "channel": channel, "cursor": cursor }));
+            } else {
+                println!("cursor[{channel}] = {cursor}");
+            }
+            Ok(0)
+        }
+        Err(e) => {
+            if json {
+                println!("{}", serde_json::json!({ "ok": false, "channel": channel, "error": e.code.as_str(), "detail": e.detail }));
+                Ok(1)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Task messages are an ordinary channel convention, not a new protocol type.
+///
+/// Format: `task:{"v":1,...}` on a normal signed message. This keeps old boards
+/// interoperable and means ACL/enforcement code stays untouched.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TaskEvent {
+    v: u8,
+    id: String,
+    kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TaskView {
+    id: String,
+    title: String,
+    created_by: String,
+    claimed_by: Option<String>,
+    done: bool,
+}
+
+fn cmd_task(json: bool, command: TaskCommand) -> Result<i32> {
+    match command {
+        TaskCommand::Create { channel, title, body } => {
+            validate_channel(&channel)?;
+            if title.trim().is_empty() || title.len() > 256 {
+                return Err(idboard_core::error::CoreError::bad_request(
+                    "task title must be non-empty and at most 256 bytes",
+                ));
+            }
+            if let Some(body) = &body {
+                validate_body(body)?;
+            }
+            let task_id = format!("t-{:x}-{}", idboard_core::now_ms(), std::process::id());
+            let event = serde_json::json!({
+                "v": 1,
+                "id": task_id.clone(),
+                "kind": "create",
+                "title": title,
+                "body": body,
+            });
+            let body = format!("task:{}", event);
+            validate_body(&body)?;
+            let client = RelayClient::from_env()?;
+            let res = match client.post(&channel, &body, Provenance::SelfOriginated) {
+                Ok(res) => res,
+                Err(e) => {
+                    if json {
+                        println!("{}", serde_json::json!({
+                            "ok": false,
+                            "error": e.code.as_str(),
+                            "detail": e.detail,
+                            "retry_after_ms": e.retry_after_ms,
+                        }));
+                        return Ok(1);
+                    }
+                    return Err(e);
+                }
+            };
+            if json {
+                println!("{}", serde_json::json!({
+                    "ok": true,
+                    "task_id": task_id,
+                    "channel": channel,
+                    "cursor": res.cursor,
+                }));
+            } else {
+                println!("created task {task_id} in {channel} as cursor {}", res.cursor.unwrap_or(0));
+            }
+            Ok(0)
+        }
+        TaskCommand::Claim { channel, task_id } => {
+            validate_channel(&channel)?;
+            let body = serde_json::json!({ "v": 1, "id": task_id, "kind": "claim" });
+            cmd_post(json, &channel, &format!("task:{}", body), Provenance::SelfOriginated)
+        }
+        TaskCommand::Done { channel, task_id } => {
+            validate_channel(&channel)?;
+            let body = serde_json::json!({ "v": 1, "id": task_id, "kind": "done" });
+            cmd_post(json, &channel, &format!("task:{}", body), Provenance::SelfOriginated)
+        }
+        TaskCommand::List { channel, open: _, all, mine } => {
+            validate_channel(&channel)?;
+            let client = RelayClient::from_env()?;
+            let identity = client.whoami()?.identity;
+            let res = client.read(&channel, 0, 1000)?;
+            let mut tasks: std::collections::BTreeMap<String, TaskView> = std::collections::BTreeMap::new();
+            for m in res.messages {
+                let Some(ev) = parse_task_event(&m.envelope.body) else { continue };
+                match ev.kind.as_str() {
+                    "create" => {
+                        let view = TaskView {
+                            id: ev.id.clone(),
+                            title: ev.title.unwrap_or_else(|| "(untitled)".to_string()),
+                            created_by: m.envelope.sender_id.clone(),
+                            claimed_by: None,
+                            done: false,
+                        };
+                        tasks.insert(ev.id.clone(), view);
+                    }
+                    "claim" => {
+                        if let Some(task) = tasks.get_mut(&ev.id) {
+                            task.claimed_by = Some(m.envelope.sender_id);
+                        }
+                    }
+                    "done" => {
+                        if let Some(task) = tasks.get_mut(&ev.id) {
+                            task.done = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut out: Vec<_> = tasks.into_values().collect();
+            if !all {
+                out.retain(|t| !t.done);
+            }
+            if mine {
+                out.retain(|t| t.created_by == identity || t.claimed_by.as_deref() == Some(identity.as_str()));
+            }
+            if json {
+                println!("{}", serde_json::json!({ "channel": channel, "tasks": out }));
+            } else if out.is_empty() {
+                eprintln!("no tasks in {channel}");
+            } else {
+                for task in out {
+                    let claimed = task.claimed_by.unwrap_or_else(|| "unclaimed".into());
+                    println!("{} {} {} (creator {}, claimed {claimed})", if task.done { "done" } else { "open" }, task.id, task.title, task.created_by);
+                }
+            }
+            Ok(0)
+        }
+    }
+}
+
+fn parse_task_event(body: &str) -> Option<TaskEvent> {
+    let text = body.strip_prefix("task:")?;
+    serde_json::from_str(text).ok().filter(|e: &TaskEvent| e.v == 1)
+}
+
+
 ///
 /// This does not create or repair anything. It reports what is wrong so an
 /// operator (or an agent's shell) can act on it without guessing whether the

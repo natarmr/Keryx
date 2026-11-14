@@ -1822,3 +1822,68 @@ fn the_legacy_command_aliases_are_still_installed() {
         assert!(stdout.contains(expected) || stderr.contains(expected), "{name} did not produce {expected}'s output: {stdout} {stderr}");
     }
 }
+
+#[test]
+fn web_once_serves_the_landing_page_over_loopback() {
+    let b = TestBoard::start();
+
+    // Pre-select an ephemeral port; tiny race, acceptable for the one request we perform.
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("bind scratch port")
+        .local_addr()
+        .expect("local addr")
+        .port();
+
+    let mut child = Command::new(sibling_bin("keryx"))
+        .arg("web")
+        .arg("--once")
+        .arg("--bind")
+        .arg(format!("127.0.0.1:{port}"))
+        .env("IDBOARD_HOME", b.home.path())
+        .env("IDBOARD_CONFIG", &b.config)
+        .env("IDBOARD_DAEMON", &b.socket)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn keryx web --once");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let child_stdout = child.stdout.take().expect("stdout piped");
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let mut reader = std::io::BufReader::new(child_stdout);
+        let _ = std::io::BufRead::read_line(&mut reader, &mut line);
+        let _ = tx.send(line);
+    });
+
+    let line = match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(line) => line,
+        Err(_) => {
+            let _ = child.kill();
+            panic!("keryx web --once did not print its URL in time");
+        }
+    };
+    assert!(line.contains("http://127.0.0.1:"), "{line}");
+    let url = line
+        .split_whitespace()
+        .find(|part| part.starts_with("http://127.0.0.1:"))
+        .expect("URL in printed line")
+        .trim_end_matches('/')
+        .to_string();
+
+    let path = url.strip_prefix("http://127.0.0.1:").expect("loopback URL");
+    let path = path.splitn(2, '/').nth(1).map(|rest| format!("/{rest}")).unwrap_or_else(|| "/".to_string());
+
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to web console");
+    use std::io::Write;
+    write!(stream, "GET {path} HTTP/1.0\r\nConnection: close\r\n\r\n").expect("write request");
+    let mut response = String::new();
+    std::io::Read::read_to_string(&mut stream, &mut response).expect("read response");
+
+    assert!(response.contains("HTTP/1.0 200 OK"), "{response}");
+    assert!(response.contains("Keryx console"), "{response}");
+    assert!(!response.contains("POST"), "{response}");
+
+    let status = child.wait().expect("keryx web --once exits after one request");
+    assert!(status.success(), "{status:?}");
+}

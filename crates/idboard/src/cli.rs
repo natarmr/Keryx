@@ -163,6 +163,16 @@ enum Command {
         watch_interval_ms: u64,
     },
 
+    /// Serve a local read-only web console on loopback.
+    Web {
+        /// Loopback bind address. Only `127.0.0.1` / `::1` / `localhost` are allowed.
+        #[arg(long, default_value = "127.0.0.1:0")]
+        bind: String,
+        /// Stop after the first request. Used by tests and scripted checks.
+        #[arg(long)]
+        once: bool,
+    },
+
     /// Start-of-task brief for agents: identity, relevant tasks and recent messages.
     Focus {
         /// Number of recent messages per channel to show. Defaults to 3.
@@ -404,6 +414,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Command::Console { limit, brief, watch, watch_interval_ms } => {
             cmd_console(json, limit, brief, watch, watch_interval_ms)
         }
+        Command::Web { bind, once } => cmd_web(json, &bind, once),
         Command::Focus { limit } => cmd_focus(json, limit),
         Command::Next => cmd_task(json, Some(TaskCommand::Next { channel: None })),
         Command::Replay { channel, since_last, since, limit, save_cursor } => {
@@ -817,6 +828,7 @@ You are running as the keryx identity `{name}`.
 - `keryx console --brief` prints a single-line status for heartbeat prompts.
 - `keryx console` is a local read-only status view (checks + board summary when inside a wrapper).
 - `keryx console --brief` prints a one-line status suitable for heartbeat prompts.
+- `keryx web` serves that same read-only board view on loopback; the URL carries an ephemeral token.
 - `keryx focus` is the start-of-task summary: identity, claimed tasks, next task and recent messages.
 - `keryx replay <channel> [--since-last] [--save-cursor] [--limit N]` reconstructs a readable backlog.
 - `keryx next` is a shortcut for `keryx task next`.
@@ -1865,6 +1877,274 @@ fn board_summary(limit: u32) -> serde_json::Value {
     })
 }
 
+fn web_data(limit: u32) -> serde_json::Value {
+    let checks = collect_doctor_checks();
+    let (problems, ok) = summarize_doctor_checks(&checks);
+    let board = board_summary(limit);
+    serde_json::json!({
+        "ok": ok,
+        "report_version": 1,
+        "checks": checks,
+        "problems": problems,
+        "board": board,
+    })
+}
+
+fn response_for_request(request: &str, token: &str, limit: u32) -> (u16, &'static str, Vec<u8>) {
+    let mut parts = request.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+    let version = parts.next().unwrap_or("");
+    if !version.starts_with("HTTP/") {
+        return (400, "text/plain; charset=utf-8", b"bad request\n".to_vec());
+    }
+    if method != "GET" && method != "HEAD" {
+        return (405, "text/plain; charset=utf-8", b"method not allowed\n".to_vec());
+    }
+
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    let Some(rest) = path.strip_prefix('/') else {
+        return (404, "text/plain; charset=utf-8", b"not found\n".to_vec());
+    };
+    let mut pieces = rest.splitn(2, '/');
+    let Some(first) = pieces.next() else {
+        return (404, "text/plain; charset=utf-8", b"not found\n".to_vec());
+    };
+    if first != token {
+        return (404, "text/plain; charset=utf-8", b"not found\n".to_vec());
+    }
+    let route = pieces.next().unwrap_or("").trim_end_matches('/');
+    match route {
+        "" => (200, "text/html; charset=utf-8", WEB_HTML.as_bytes().to_vec()),
+        "data" => {
+            let body = serde_json::to_vec(&web_data(limit)).unwrap_or_else(|_| br#"{"ok":false,"error":"internal"}"#.to_vec());
+            (200, "application/json; charset=utf-8", body)
+        }
+        _ => (404, "text/plain; charset=utf-8", b"not found\n".to_vec()),
+    }
+}
+
+fn web_bind_is_loopback(bind: &str) -> bool {
+    let host = bind.rsplit_once(':').map(|(host, _)| host).unwrap_or(bind);
+    let host = host.trim_matches(['[', ']']);
+    matches!(host, "127.0.0.1" | "::1" | "localhost")
+}
+
+fn cmd_web(json: bool, bind: &str, once: bool) -> Result<i32> {
+    if !web_bind_is_loopback(bind) {
+        return Err(idboard_core::error::CoreError::bad_request(
+            "--bind must be a loopback address (127.0.0.1, ::1 or localhost); the console is local/read-only",
+        ));
+    }
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind(bind).map_err(|e| {
+        idboard_core::error::CoreError::internal(format!("failed to bind web console at {bind}: {e}"))
+    })?;
+    let local = listener.local_addr().map_err(|e| {
+        idboard_core::error::CoreError::internal(format!("failed to read web console address: {e}"))
+    })?;
+    let token = idboard::relay::random_suffix()?;
+    let url = format!("http://{local}/{token}/");
+    if json {
+        println!("{}", serde_json::json!({ "ok": true, "url": url }));
+    } else {
+        println!("web console: {url}");
+        println!("read-only; served only on loopback; leave this process running (Ctrl-C to stop).");
+    }
+
+    let mut count = 0;
+    loop {
+        let Ok((mut socket, _)) = listener.accept() else { continue };
+        socket.set_read_timeout(Some(Duration::from_secs(3))).ok();
+        let mut request = Vec::with_capacity(2048);
+        let mut buf = [0u8; 2048];
+        loop {
+            let read = match socket.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            request.extend_from_slice(&buf[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") || request.len() > 8192 {
+                break;
+            }
+        }
+        let Ok(request_text) = std::str::from_utf8(&request) else {
+            let _ = socket.write_all(b"HTTP/1.0 400 Bad Request\r\ncontent-length: 11\r\n\r\nbad request\n");
+            if once {
+                return Ok(0);
+            }
+            continue;
+        };
+        let method = request_text.split_whitespace().next().unwrap_or("");
+        let (status, content_type, body) = response_for_request(request_text, &token, 5);
+        let status_line = match status {
+            200 => "OK",
+            400 => "Bad Request",
+            404 => "Not Found",
+            405 => "Method Not Allowed",
+            _ => "Error",
+        };
+        let head_body = if method == "HEAD" { Vec::new() } else { body };
+        let response = format!(
+            "HTTP/1.0 {status} {status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src self; style-src 'unsafe-inline'; script-src 'unsafe-inline'\r\n\r\n",
+            head_body.len()
+        );
+        let _ = socket.write_all(response.as_bytes());
+        let _ = socket.write_all(&head_body);
+        count += 1;
+        if once && count >= 1 {
+            return Ok(0);
+        }
+    }
+}
+
+const WEB_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keryx console</title>
+<style>
+:root { color-scheme: dark; --bg:#090a0f; --panel:#131720; --panel2:#1b2130; --border:#283045; --text:#e6eaf7; --muted:#8d99b8; --ok:#42d392; --warn:#ffcc66; --bad:#ff6b6b; --mono: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+* { box-sizing: border-box; }
+body { margin: 0; background: radial-gradient(circle at 15% -10%, #19233a 0, transparent 35%), radial-gradient(circle at 90% 120%, #241733 0, transparent 40%), var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+header { padding: 22px 28px 14px; border-bottom: 1px solid var(--border); display:flex; align-items:baseline; justify-content:space-between; gap:24px; }
+h1 { font-size: 22px; margin: 0; letter-spacing: .04em; }
+h2 { font-size: 11px; margin: 0 0 14px; color: var(--muted); letter-spacing: .18em; text-transform: uppercase; }
+main { padding: 24px 28px 40px; max-width: 1200px; margin: 0 auto; display: grid; gap: 18px; }
+.grid { display:grid; gap:16px; }
+.two { grid-template-columns: repeat(2, minmax(0,1fr)); }
+.panel { background: linear-gradient(180deg, var(--panel), var(--panel2)); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
+.panel.ok { border-left: 3px solid var(--ok); } .panel.bad { border-left: 3px solid var(--bad); } .panel.warn { border-left: 3px solid var(--warn); }
+.statusline { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+.badge { display:inline-flex; align-items:center; gap:8px; font: 12px var(--mono); padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); }
+.badge.ok { color: var(--ok); border-color: rgba(66,211,146,.35); } .badge.bad { color: var(--bad); border-color: rgba(255,107,107,.35); }
+.muted { color: var(--muted); } .mono { font-family: var(--mono); }
+.metrics { display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:10px; margin-top: 14px; }
+.metric { background: rgba(255,255,255,.03); border-radius: 10px; padding: 10px 12px; }
+.metric strong { display:block; font-size: 28px; line-height:1; }
+.metric span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing:.08em; }
+ul { margin: 0; padding-left: 18px; } li { margin: 6px 0; } li.fail { color: var(--bad); } li.ok { color: var(--ok); }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid rgba(255,255,255,.06); vertical-align: top; }
+th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing:.08em; }
+td.mono { font-family: var(--mono); }
+.empty { color: var(--muted); font-style: italic; }
+footer { padding: 18px 28px 28px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
+@media (max-width: 860px) { .two, .metrics { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Keryx console</h1>
+    <div class="muted">read-only board health for operators and agents</div>
+  </div>
+  <div class="muted mono">served on loopback · Ctrl-C to stop the console process</div>
+</header>
+<main id="root">
+  <section class="panel ok" id="local-panel">
+    <h2>Local checks</h2>
+    <div id="local-summary" class="statusline"><span class="badge">loading…</span></div>
+    <ul id="local-checks"></ul>
+    <div id="local-problems"></div>
+  </section>
+
+  <section class="grid two">
+    <div class="panel ok" id="board-panel">
+      <h2>Board</h2>
+      <div class="statusline"><span id="board-status" class="badge">loading…</span><span id="board-identity" class="muted mono"></span></div>
+      <div class="metrics">
+        <div class="metric"><strong id="channels">…</strong><span>channels</span></div>
+        <div class="metric"><strong id="tasks-open">…</strong><span>open</span></div>
+        <div class="metric"><strong id="tasks-claimed">…</strong><span>claimed</span></div>
+        <div class="metric"><strong id="tasks-done">…</strong><span>done</span></div>
+      </div>
+    </div>
+
+    <div class="panel" id="tasks-panel">
+      <h2>Tasks</h2>
+      <div id="tasks-summary" class="statusline"><span class="muted">waiting for board data…</span></div>
+      <div id="tasks-by-identity" class="mono muted" style="margin-top:12px"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="recent-panel">
+    <h2>Recent messages</h2>
+    <div id="recent"><span class="empty">loading…</span></div>
+  </section>
+
+  <section class="panel" id="channels-panel">
+    <h2>Channels</h2>
+    <div id="channels-table"><span class="empty">loading…</span></div>
+  </section>
+</main>
+<footer><span class="mono">Keryx console</span> · this page is served from the same process as the board, on loopback only. Body text and identities are displayed as plain text only.</footer>
+<script>
+const text = (v) => v === null || v === undefined ? '—' : String(v);
+const esc = (v) => String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = text(v); };
+function renderCheck(name, ok, detail) {
+  return `<li class="${ok ? 'ok' : 'fail'}"><span class="mono">${esc(name)}</span> — ${esc(detail)}</li>`;
+}
+function renderRow(cells) {
+  return `<tr>${cells.map(c => `<td class="${c.mono ? 'mono' : ''}">${esc(c.v)}</td>`).join('')}</tr>`;
+}
+async function refresh() {
+  const res = await fetch('./data', { cache: 'no-store' });
+  if (!res.ok) { document.getElementById('local-summary').innerHTML = '<span class="badge bad">console error</span>'; return; }
+  const data = await res.json();
+  const local = data.checks || [];
+  const failed = local.filter(c => c.ok === false);
+  document.getElementById('local-panel').className = `panel ${failed.length ? 'bad' : 'ok'}`;
+  document.getElementById('local-summary').innerHTML =
+    `<span class="badge ${failed.length ? 'bad' : 'ok'}">${failed.length ? 'attention' : 'ok'}</span>` +
+    `<span class="muted">${failed.length} problem(s), ${local.length} check(s)</span>`;
+  document.getElementById('local-checks').innerHTML = local.map(c => renderCheck(c.name, c.ok !== false, c.detail || '')).join('');
+  document.getElementById('local-problems').innerHTML = (data.problems || []).map(p => `<div class="fail muted mono">problem: ${esc(p.check)} — ${esc(p.detail)}</div>`).join('');
+
+  const board = data.board || {};
+  const available = board.available === true;
+  document.getElementById('board-panel').className = `panel ${available ? 'ok' : 'bad'}`;
+  setText('board-status', available ? 'board online (inside wrapper)' : 'board unavailable: run inside `keryx run`');
+  setText('board-identity', board.identity || '');
+  setText('channels', (board.channels || []).length);
+  setText('tasks-open', board.tasks?.open ?? '—');
+  setText('tasks-claimed', board.tasks?.claimed ?? '—');
+  setText('tasks-done', board.tasks?.done ?? '—');
+
+  const oldest = board.tasks?.oldest_unclaimed;
+  document.getElementById('tasks-panel').className = `panel ${oldest ? 'warn' : ''}`;
+  setText('tasks-summary', oldest
+    ? `oldest unclaimed task: ${oldest.id} — ${oldest.title} (${oldest.channel})`
+    : 'no unclaimed tasks');
+  const by = board.tasks?.claimed_by || {};
+  document.getElementById('tasks-by-identity').textContent =
+    Object.keys(by).length
+      ? Object.entries(by).map(([who, n]) => `${who}: ${n} claimed`).join(' · ')
+      : 'nobody holds a claim right now';
+
+  const recent = board.recent || [];
+  document.getElementById('recent').innerHTML = recent.length
+    ? `<table><thead><tr><th>cursor</th><th>channel</th><th>sender</th><th>body</th></tr></thead><tbody>${recent.map(m => renderRow([{v:m.cursor,mono:true},{v:m.channel,mono:true},{v:m.sender,mono:true},{v:m.body}])).join('')}</tbody></table>`
+    : '<span class="empty">no recent messages</span>';
+
+  const channels = board.channels || [];
+  document.getElementById('channels-table').innerHTML = channels.length
+    ? `<table><thead><tr><th>channel</th><th>access</th><th>cursor</th><th>messages</th></tr></thead><tbody>${channels.map(c => renderRow([{v:c.channel,mono:true},{v:`read=${c.can_read} post=${c.can_post}`},{v:c.cursor,mono:true},{v:c.messages,mono:true}])).join('')}</tbody></table>`
+    : '<span class="empty">no channels visible</span>';
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
+"#;
+
 fn cmd_whoami(json: bool) -> Result<i32> {
     let client = RelayClient::from_env()?;
     let id = client.whoami()?;
@@ -1989,6 +2269,26 @@ fn render_message(sender: &str, cursor: i64, provenance: &Provenance, body: &str
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn web_response_requires_the_ephemeral_token_and_only_supports_read_methods() {
+        let html = response_for_request("GET /test-token/ HTTP/1.1\r\n\r\n", "test-token", 5);
+        assert_eq!(html.0, 200);
+        assert_eq!(html.1, "text/html; charset=utf-8");
+        let body = String::from_utf8(html.2.clone()).unwrap();
+        assert!(body.contains("Keryx console"), "{body}");
+
+        let miss = response_for_request("GET /wrong/ HTTP/1.1\r\n\r\n", "test-token", 5);
+        assert_eq!(miss.0, 404);
+
+        let post = response_for_request("POST /test-token/ HTTP/1.1\r\n\r\n", "test-token", 5);
+        assert_eq!(post.0, 405);
+
+        let head = response_for_request("HEAD /test-token/ HTTP/1.1\r\n\r\n", "test-token", 5);
+        assert_eq!(head.0, 200);
+        assert_eq!(web_bind_is_loopback("127.0.0.1:0"), true);
+        assert_eq!(web_bind_is_loopback("0.0.0.0:0"), false);
+    }
 
     #[test]
     fn exit_on_json_matches_structured_bodies_and_requires_key_eq_value() {

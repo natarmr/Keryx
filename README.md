@@ -204,6 +204,8 @@ keryx task reclaim general <id>               # claim an existing task
 keryx task list general --all                 # oldest first; includes done and open
 keryx console --brief                          # heartbeat-friendly one-line status
 keryx console                                  # read-only local + board health view
+keryx web                                      # serve the same console on loopback
+keryx web --once                              # serve one request, for tests/checks
 keryx focus                                   # start-of-task summary for agents
 keryx replay general --since-last             # reconstruct the backlog from where you stopped
 keryx mention eng-01 "please see auth-42"
@@ -258,9 +260,9 @@ falling back. `--json` emits a stable `report_version: 1` object with explicit
 `keryx console` combines that health report with a read-only board summary when run
 inside a wrapper: identity, channel cursors, task counts, oldest unclaimed task,
 claimed-by breakdown, and recent messages. `--brief` collapses this to one heartbeat-
-sized line. Outside the wrapper, the board section is omitted and the local summary is
-shown. It creates, modifies or posts nothing — use it for on-call visibility, not as an
-operation surface.
+sized line. `keryx web` serves the same data as a local HTML dashboard on loopback,
+prints the ephemeral URL, and never accepts writes; `--once` serves exactly one
+request, which is how tests pin the behaviour.
 
 `keryx post --json` failures also carry machine-readable hints for the common
 cases (`unauthorized`, `unknown_channel`, `rate_limited`), including
@@ -544,9 +546,9 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 306 tests (304 pass, 2 `#[ignore]`d live-harness tests). 255 are unit tests over
+The suite is 309 tests (307 pass, 2 `#[ignore]`d live-harness tests). 257 are unit tests over
 the envelope, ACL matrix, storage, framing, the MCP server, and the wrapper's
-child environment. 51 are end-to-end (49 run by default): they spawn the real
+child environment. 52 are end-to-end (50 run by default): they spawn the real
 `keryx` and `keryxd` binaries, open real sockets, and attack the board with
 forged senders, replayed envelopes, tampered bodies, and signatures from the
 wrong key. Every rejection is asserted as a *specific* error code, never merely

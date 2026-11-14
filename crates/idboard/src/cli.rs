@@ -412,9 +412,22 @@ fn cmd_post(json: bool, channel: &str, body: &str, provenance: Provenance) -> Re
     let res = match client.post(channel, body, provenance) {
         Ok(res) => res,
         Err(e) => {
-            // `--json` keeps failures machine-readable too, including the
-            // optional rate-limit hint.
+            // `--json` keeps failures machine-readable too, including the optional
+            // rate-limit hint and a small set of actionable referrals.
             if json {
+                let (visible, closest) = match e.code {
+                    idboard_core::ErrorCode::Unauthorized | idboard_core::ErrorCode::UnknownChannel => {
+                        let visible = client.inbox(0).ok().map(|r| {
+                            r.channels.into_iter().map(|c| c.channel).collect::<Vec<_>>()
+                        });
+                        let closest = visible
+                            .as_ref()
+                            .map(|v| closest_names(channel, v, 3))
+                            .unwrap_or_default();
+                        (visible, Some(closest))
+                    }
+                    _ => (None, None),
+                };
                 println!(
                     "{}",
                     serde_json::json!({
@@ -422,6 +435,9 @@ fn cmd_post(json: bool, channel: &str, body: &str, provenance: Provenance) -> Re
                         "error": e.code.as_str(),
                         "detail": e.detail,
                         "retry_after_ms": e.retry_after_ms,
+                        "hint": post_error_hint(e.code),
+                        "visible_channels": visible,
+                        "closest_channels": closest,
                     })
                 );
                 return Ok(1);
@@ -435,6 +451,38 @@ fn cmd_post(json: bool, channel: &str, body: &str, provenance: Provenance) -> Re
         println!("posted to {channel} as cursor {}", res.cursor.unwrap_or(0));
     }
     Ok(0)
+}
+
+fn post_error_hint(code: idboard_core::ErrorCode) -> &'static str {
+    match code {
+        idboard_core::ErrorCode::Unauthorized => "this identity cannot post here; inspect the channel grants with the daemon owner (`idboardd --show-acl`) or choose a visible channel",
+        idboard_core::ErrorCode::UnknownChannel => "there is no `[channel.<name>]` grant for that channel; inspect it with the daemon owner or use one from `visible_channels`",
+        idboard_core::ErrorCode::RateLimited => "the post budget is exhausted; wait for `retry_after_ms` or ask the operator to raise `[limits].posts_per_window`",
+        _ => "read the error code and detail, or re-run with `--json` for machine-readable diagnostics",
+    }
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev_row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut current_row = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            current_row[j + 1] = std::cmp::min(
+                std::cmp::min(current_row[j] + 1, prev_row[j + 1] + 1),
+                prev_row[j] + usize::from(ca != cb),
+            );
+        }
+        prev_row = current_row;
+    }
+    prev_row[b.len()]
+}
+
+fn closest_names(target: &str, candidates: &[String], n: usize) -> Vec<String> {
+    let mut ranked: Vec<(usize, String)> = candidates.iter().map(|c| (edit_distance(target, c), c.clone())).collect();
+    ranked.sort_by(|(a_dist, a_name), (b_dist, b_name)| a_dist.cmp(b_dist).then(a_name.cmp(b_name)));
+    ranked.into_iter().take(n).map(|(_, name)| name).collect()
 }
 
 fn identity_for_cursor(client: &RelayClient, needed: bool) -> Result<Option<String>> {
@@ -1056,7 +1104,6 @@ fn cmd_doctor(json: bool) -> Result<i32> {
     let mut checks = Vec::new();
     let home = layout::idboard_home();
     let config_path = layout::config_path();
-    let mut problems = Vec::new();
 
     match std::fs::metadata(&home) {
         Ok(md) if md.is_dir() => {
@@ -1065,7 +1112,6 @@ fn cmd_doctor(json: bool) -> Result<i32> {
         _ => {
             let detail = format!("state root {} is missing or not a directory", home.display());
             checks.push(serde_json::json!({ "name": "state-root", "ok": false, "detail": detail.clone() }));
-            problems.push(detail);
         }
     }
 
@@ -1077,7 +1123,6 @@ fn cmd_doctor(json: bool) -> Result<i32> {
         Err(e) => {
             let detail = e.to_string();
             checks.push(serde_json::json!({ "name": "config", "ok": false, "detail": detail.clone() }));
-            problems.push(detail);
             None
         }
     };
@@ -1109,9 +1154,6 @@ fn cmd_doctor(json: bool) -> Result<i32> {
                     format!("{} key is unavailable: {}", identity.name, e),
                 ),
             };
-            if !ok {
-                problems.push(detail.clone());
-            }
             checks.push(serde_json::json!({ "name": format!("key:{}", identity.name), "ok": ok, "detail": detail }));
         }
     }
@@ -1122,7 +1164,6 @@ fn cmd_doctor(json: bool) -> Result<i32> {
         Err(e) => {
             let detail = format!("daemon socket {} is unreachable: {}", socket.display(), e);
             checks.push(serde_json::json!({ "name": "daemon-socket", "ok": false, "detail": detail.clone() }));
-            problems.push(detail);
         }
     }
 
@@ -1132,15 +1173,27 @@ fn cmd_doctor(json: bool) -> Result<i32> {
             Err(e) => {
                 let detail = e.detail;
                 checks.push(serde_json::json!({ "name": "wrapper", "ok": false, "detail": detail.clone() }));
-                problems.push(detail);
             }
         },
         Err(_) => checks.push(serde_json::json!({ "name": "wrapper", "ok": true, "detail": "not inside a wrapper; this is expected outside `idboard run`" })),
     }
 
+    let problems: Vec<serde_json::Value> = checks
+        .iter()
+        .filter(|check| !check["ok"].as_bool().unwrap_or(false))
+        .map(|check| serde_json::json!({
+            "check": check["name"].as_str().unwrap_or("check"),
+            "detail": check["detail"].as_str().unwrap_or(""),
+        }))
+        .collect();
     let ok = problems.is_empty();
     if json {
-        println!("{}", serde_json::json!({ "ok": ok, "checks": checks, "problems": problems }));
+        println!("{}", serde_json::json!({
+            "ok": ok,
+            "report_version": 1,
+            "checks": checks,
+            "problems": problems,
+        }));
     } else {
         println!("idboard doctor: {}", if ok { "ok" } else { "failed" });
         for check in checks {
@@ -1276,6 +1329,25 @@ fn render_message(sender: &str, cursor: i64, provenance: &Provenance, body: &str
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn exit_on_json_matches_structured_bodies_and_requires_key_eq_value() {
+        let (key, value) = parse_exit_on_json("kind=done").unwrap();
+        assert_eq!(key, "kind");
+        assert_eq!(value, serde_json::Value::String("done".into()));
+        let body = serde_json::json!({ "kind": "done" }).to_string();
+        assert!(json_message_matches(&body, "kind", &serde_json::Value::String("done".into())));
+        assert!(!json_message_matches("not json", "kind", &serde_json::Value::Null));
+        assert!(parse_exit_on_json("kind").is_err());
+    }
+
+    #[test]
+    fn edit_distance_and_closest_names_are_deterministic() {
+        assert_eq!(edit_distance("general", "general"), 0);
+        assert_eq!(edit_distance("general", "generals"), 1);
+        let names = vec!["general".to_string(), "deploy-approvals".to_string(), "eng-01".to_string()];
+        assert_eq!(closest_names("general", &names, 2), vec!["general", "eng-01"]);
+    }
 
     #[test]
     fn the_argument_parser_is_valid() {

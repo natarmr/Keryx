@@ -1487,6 +1487,27 @@ fn inbox_and_peers_are_inert_outside_a_wrapper() {
 }
 
 #[test]
+fn post_json_errors_include_actionable_machine_hints() {
+    let b = TestBoard::start();
+
+    let out = b.as_identity("eng-01", &["post", "deploy-approvals", "not allowed", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("post --json must print JSON");
+    assert_eq!(v["error"], "unauthorized");
+    assert!(v["hint"].as_str().unwrap().contains("acl") || v["hint"].as_str().unwrap().contains("grant"), "{v}");
+    assert!(v["visible_channels"].as_array().is_some(), "{v}");
+
+    let out = b.as_identity("eng-01", &["post", "genesral", "typo", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("post --json must print JSON");
+    assert_eq!(v["error"], "unknown_channel");
+    let closest = v["closest_channels"].as_array().expect("closest channel list");
+    assert!(closest.iter().any(|n| n == "general"), "{closest:?}");
+}
+
+#[test]
 fn task_create_claim_done_and_list_use_plain_board_messages() {
     let b = TestBoard::start();
 
@@ -1620,6 +1641,18 @@ fn doctor_reports_a_healthy_scratch_installation() {
     assert!(stdout.contains("doctor: ok"), "{stdout}");
     assert!(stdout.contains("key:eng-01"), "{stdout}");
     assert!(stdout.contains("daemon-socket"), "{stdout}");
+}
+
+#[test]
+fn doctor_json_uses_a_stable_report_shape() {
+    let b = TestBoard::start();
+    let out = b.idboard(&["doctor", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("doctor --json must be JSON");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["report_version"], 1);
+    assert!(v["checks"].as_array().is_some());
+    assert!(v["problems"].as_array().unwrap().is_empty());
 }
 
 #[test]

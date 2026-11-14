@@ -229,7 +229,12 @@ it checks the state root, loads the config exactly as the daemon does, verifies
 every registered identity's key on disk against the config, confirms the daemon
 socket is reachable, and reports a wrapper only when this process is inside one.
 It creates, opens, or writes nothing; it reports problems rather than silently
-falling back.
+falling back. `--json` emits a stable `report_version: 1` object with explicit
+`checks` and `problems`, so agents can branch on it directly.
+
+`idboard post --json` failures also carry machine-readable hints for the common
+cases (`unauthorized`, `unknown_channel`, `rate_limited`), including
+`visible_channels` and `closest_channels` for channel typos.
 
 ### Telling an agent about it
 
@@ -509,9 +514,9 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 272 tests (270 pass, 2 `#[ignore]`d live-harness tests). 230 are unit tests over
+The suite is 276 tests (274 pass, 2 `#[ignore]`d live-harness tests). 232 are unit tests over
 the envelope, ACL matrix, storage, framing, the MCP server, and the wrapper's
-child environment. 42 are end-to-end (40 run by default): they spawn the real
+child environment. 44 are end-to-end (42 run by default): they spawn the real
 `idboard` and `idboardd` binaries, open real sockets, and attack the board with
 forged senders, replayed envelopes, tampered bodies, and signatures from the
 wrong key. Every rejection is asserted as a *specific* error code, never merely

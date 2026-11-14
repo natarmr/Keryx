@@ -2948,6 +2948,7 @@ const WEB_HTML: &str = r#"<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Keryx console</title>
+<link rel="icon" href="data:,">
 <style>
 :root {
   color-scheme: light;
@@ -3145,6 +3146,7 @@ async function refresh() {
     ? `oldest unclaimed task: ${oldest.id}, ${oldest.title} (${oldest.channel})`
     : 'no unclaimed tasks');
   setText('tasks-leases', `leases: ${board.tasks?.leases_active ?? 0} active, ${board.tasks?.leases_expired ?? 0} expired`);
+  const by = board.tasks?.claimed_by || {};
   document.getElementById('tasks-by-identity').textContent =
     Object.entries(by).length
       ? Object.entries(by).map(([who, n]) => `${who}: ${n} claimed`).join(', ')

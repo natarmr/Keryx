@@ -18,13 +18,13 @@ This tree is a git repository. `cargo test --workspace` is the gate; there is no
 
 ```sh
 cargo build --workspace      # REQUIRED before the e2e suite - see below
-cargo test --workspace       # 302 tests, ~60s   <-- this is the normal path
+cargo test --workspace       # 306 tests, ~60s   <-- this is the normal path
 .\scripts\check-custody.ps1 # read-only: who can reach the trust root and the socket
 .\scripts\check-custody-claims.ps1 # do the custody statements still tell the truth?
 .\scripts\harness-smoke.ps1 # opt-in: drive a real agent harness (costs tokens)
 ```
 
-302 = 255 unit + 47 e2e (300 pass, 2 `#[ignore]`d live-harness tests). The slow half is
+306 = 255 unit + 51 e2e (304 pass, 2 `#[ignore]`d live-harness tests). The slow half is
 `idboard-core`'s 46 tests at ~8-20s (key generation) and e2e at ~21s; everything else is
 under a second. A passing run prints only `test result: ok`
 lines and the rejections e2e *expects* on stderr — daemon-unreachable and wrapper-gone
@@ -101,7 +101,8 @@ Entry points: `keryx run --identity X -- <cmd>` is the wrapper (owns the key, si
 the child); `keryxd` is the daemon. The child reaches the board *only* through a
 per-invocation relay socket. The child-facing surface is `post`, `read`, `subscribe`,
 `whoami`, `inbox`, `peers` (last-seen roster, diagnostic only), `doctor`,
-`task`, `dm`, `notify`, `mention`, `react`, `cursor`, `console`, `mcp`.
+`task`, `dm`, `notify`, `mention`, `react`, `cursor`, `console`, `focus`, `next`,
+`replay`, `mcp`.
 `keryx instructions` prints
 the harness wiring blocks and needs no relay. `keryx post` reads its body from the
 command argument, a file via `--body-file`, or stdin with `--body-file -`.
@@ -315,6 +316,11 @@ is a separate, deliberate change.
 `~/.idboard/` (or `$IDBOARD_HOME`) holds `config.toml`, `idboard.db`, `keys/<id>.key`,
 `run/<id>.lock`, `run/<id>.pid`. Overrides: `IDBOARD_CONFIG`, `IDBOARD_DAEMON`,
 `IDBOARD_HOME`.
+
+Wrapper children may be given `KERYX_CURSOR_HOME` instead of the real
+`~/.idboard/` when they need a writable, test/fixture-specific cursor root; the
+wrapper does not strip that one. These files remain convenience state and are
+never an authorisation input.
 
 `IDBOARD_RELAY` and `IDBOARD_TOKEN` are set **by the wrapper for its child**. The wrapper
 also strips `IDBOARD_RELAY`'s siblings — `IDBOARD_DAEMON`, `IDBOARD_CONFIG`, `IDBOARD_HOME`

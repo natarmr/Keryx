@@ -119,6 +119,7 @@ impl TestBoard {
             (layout::ENV_HOME.into(), self.home.path().display().to_string()),
             (layout::ENV_DAEMON.into(), self.socket.display().to_string()),
             (layout::ENV_CONFIG.into(), self.config.display().to_string()),
+            ("KERYX_CURSOR_HOME".into(), self.home.path().join("keryx-cursors").display().to_string()),
         ]
     }
 
@@ -1598,6 +1599,89 @@ fn console_shows_local_and_board_state() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["report_version"], 1);
     assert!(v["board"]["available"].as_bool().unwrap());
+}
+
+#[test]
+fn task_recovers_from_reopen_and_abandon_without_losing_the_board() {
+    let b = TestBoard::start();
+
+    let created = b.as_identity("eng-01", &["task", "create", "general", "recover me"]);
+    let created_out = String::from_utf8_lossy(&created.stdout);
+    let task_id = created_out
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id")
+        .to_string();
+
+    b.as_identity("eng-01", &["task", "claim", "general", &task_id]);
+    b.as_identity("eng-01", &["task", "abandon", "general", &task_id]);
+
+    let next = b.as_identity("eng-01", &["task", "next", "general"]);
+    let stdout = String::from_utf8_lossy(&next.stdout);
+    assert!(stdout.contains(&task_id), "abandoned tasks must return to the pool: {stdout}");
+
+    b.as_identity("eng-01", &["task", "complete", "general", &task_id, "--body", "helped"]);
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--all", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert!(v["tasks"].as_array().unwrap().iter().any(|t| t["id"] == task_id && t["done"] == true));
+
+    b.as_identity("eng-01", &["task", "reopen", "general", &task_id]);
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let t = v["tasks"].as_array().unwrap().iter().find(|t| t["id"] == task_id).expect("task returned to the open list");
+    assert_eq!(t["done"], false);
+    assert!(t["claimed_by"].is_null());
+}
+
+#[test]
+fn console_brief_reports_agents_and_recent_board_age() {
+    let b = TestBoard::start();
+
+    b.post("eng-01", "general", "context");
+    b.as_identity("eng-01", &["task", "create", "general", "console task"]);
+    b.as_identity("eng-02", &["task", "claim", "general", "console task-absent-id"]); // will fail, but does not disturb state
+
+    let inside = b.as_identity("eng-01", &["console", "--brief"]);
+    let stdout = String::from_utf8_lossy(&inside.stdout);
+    assert!(inside.status.success(), "{}", String::from_utf8_lossy(&inside.stderr));
+    assert!(stdout.contains("STATE="), "{stdout}");
+    assert!(stdout.contains("tasks_open="), "{stdout}");
+    assert!(stdout.contains("last_age="), "{stdout}");
+}
+
+#[test]
+fn focus_reports_the_next_task_and_mixed_workload() {
+    let b = TestBoard::start();
+
+    b.as_identity("eng-01", &["task", "create", "general", "focus candidate"]);
+    let out = b.as_identity("eng-01", &["focus"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("focus: eng-01"), "{stdout}");
+    assert!(stdout.contains("your claimed tasks:"), "{stdout}");
+    assert!(stdout.contains("recent messages"), "{stdout}");
+}
+
+#[test]
+fn replay_shows_history_and_respects_cursor_resume() {
+    let b = TestBoard::start();
+
+    b.post("eng-01", "general", "first");
+    b.post("eng-02", "general", "second");
+
+    let first = b.as_identity("eng-01", &["replay", "general", "--save-cursor"]);
+    let stdout = String::from_utf8_lossy(&first.stdout);
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    assert!(stdout.contains("first"));
+    assert!(stdout.contains("second"));
+
+    b.post("eng-01", "general", "after resume");
+    let second = b.as_identity("eng-01", &["replay", "general", "--since-last"]);
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(second.status.success(), "{}", String::from_utf8_lossy(&second.stderr));
+    assert!(stdout.contains("after resume"));
+    assert!(!stdout.contains("first"));
+    assert!(!stdout.contains("second"));
 }
 
 #[test]

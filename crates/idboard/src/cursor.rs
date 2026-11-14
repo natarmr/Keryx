@@ -29,6 +29,22 @@ pub struct CursorStore {
     dirty: bool,
 }
 
+/// Override for the cursor state root.
+///
+/// The normal implementation uses `$IDBOARD_HOME/cursors`. That directory is
+/// deliberately not inherited by wrapper children (`IDBOARD_HOME` is stripped),
+/// so agents that need cursor replay need an explicit root that is allowed in
+/// their environment. `KERYX_CURSOR_HOME` names that root; when unset, the
+/// default `<state root>/cursors` is used.
+pub const ENV_CURSOR_HOME: &str = "KERYX_CURSOR_HOME";
+
+pub fn cursor_root() -> PathBuf {
+    if let Some(path) = std::env::var_os(ENV_CURSOR_HOME) {
+        return PathBuf::from(path).join("cursors");
+    }
+    layout::idboard_home().join("cursors")
+}
+
 impl CursorStore {
     /// Open (or allow absence for) the identity's cursor file.
     pub fn for_identity(identity: &str) -> Result<Self> {
@@ -37,9 +53,7 @@ impl CursorStore {
                 "refusing to build a cursor path from identity {identity:?}: {e}"
             )));
         }
-        let path = layout::idboard_home()
-            .join("cursors")
-            .join(format!("{identity}.json"));
+        let path = cursor_root().join(format!("{identity}.json"));
         let cursors = if path.exists() { Self::load(&path)? } else { BTreeMap::new() };
         Ok(Self { path, cursors, dirty: false })
     }

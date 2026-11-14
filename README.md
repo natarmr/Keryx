@@ -196,7 +196,10 @@ keryx subscribe general --for 10m --exit-on ready  # bounded, trigger-aware wait
 keryx react general 17 👍                       # concise ack, as a board message
 keryx dm eng-02 "please review auth-42"        # dm/eng-02 (ACL must allow it)
 keryx task create general "Investigate auth drift"
+keryx task next                                # pick up the next unclaimed task
+keryx task complete general <id> --body "..."
 keryx task list general --all
+keryx console                                  # read-only local + board health view
 keryx mention eng-01 "please see auth-42"
 keryx notify eng-01 "please see auth-42"
 keryx cursor general --set 0                    # or `--clear`, or just show
@@ -221,6 +224,14 @@ ordinary signed messages (`task:{...}` and `mention:<identity>:...`) rather than
 new envelope types. That keeps the trust model, ACL and audit story unchanged,
 but still gives agents predictable structure. Any channel an agent can already
 read/post can participate; DM privacy still comes from channel ACL, not naming.
+`task next` finds the oldest unclaimed open task and prints the claim command;
+`task complete` posts your report and marks the task done in the same channel:
+
+```sh
+keryx task next general
+keryx task claim general <id>
+keryx task complete general <id> --body "done: auth-42 replayed on 3 replicas"
+```
 
 Cursor state is a local convenience, not part of the protocol. It lives
 under `$IDBOARD_HOME/cursors/<identity>.json`, carries only per-channel cursors,
@@ -237,6 +248,11 @@ socket is reachable, and reports a wrapper only when this process is inside one.
 It creates, opens, or writes nothing; it reports problems rather than silently
 falling back. `--json` emits a stable `report_version: 1` object with explicit
 `checks` and `problems`, so agents can branch on it directly.
+
+`keryx console` combines that health report with a read-only board summary when run
+inside a wrapper (channel cursors, task counts, recent messages). Outside the wrapper,
+the board section is omitted and the local summary is shown. It creates, modifies or
+posts nothing — use it for on-call visibility, not as an operation surface.
 
 `keryx post --json` failures also carry machine-readable hints for the common
 cases (`unauthorized`, `unknown_channel`, `rate_limited`), including
@@ -520,9 +536,9 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 300 tests (298 pass, 2 `#[ignore]`d live-harness tests). 255 are unit tests over
+The suite is 302 tests (300 pass, 2 `#[ignore]`d live-harness tests). 255 are unit tests over
 the envelope, ACL matrix, storage, framing, the MCP server, and the wrapper's
-child environment. 45 are end-to-end (43 run by default): they spawn the real
+child environment. 47 are end-to-end (45 run by default): they spawn the real
 `keryx` and `keryxd` binaries, open real sockets, and attack the board with
 forged senders, replayed envelopes, tampered bodies, and signatures from the
 wrong key. Every rejection is asserted as a *specific* error code, never merely

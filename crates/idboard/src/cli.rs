@@ -142,8 +142,22 @@ enum Command {
     },
     /// Cooperative task messages on a shared channel.
     Task {
+        /// Defaults to `list`: shows open tasks and suggested next actions.
         #[command(subcommand)]
-        command: TaskCommand,
+        command: Option<TaskCommand>,
+    },
+
+    /// Read-only operational console: local checks plus a board summary.
+    Console {
+        /// Newest messages per visible channel to include in the board summary.
+        #[arg(long, default_value_t = 3)]
+        limit: u32,
+        /// Re-print the console until interrupted (Ctrl-C).
+        #[arg(long)]
+        watch: bool,
+        /// Milliseconds between `--watch` refreshes.
+        #[arg(long, default_value_t = 2000)]
+        watch_interval_ms: u64,
     },
 
     /// Mention an identity in a channel, with unambiguous markup.
@@ -238,9 +252,26 @@ enum TaskCommand {
         channel: String,
         task_id: String,
     },
+    /// Suggest the next unclaimed task.
+    Next {
+        /// Optional channel to search; default is all readable channels.
+        channel: Option<String>,
+    },
+    /// Post a completion report and mark the task done.
+    Complete {
+        channel: String,
+        task_id: String,
+        /// Completion report body. Omit when using `--body-file`.
+        #[arg(long)]
+        body: Option<String>,
+        /// Read the body from a file. `-` reads stdin.
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<std::path::PathBuf>,
+    },
     /// List task state reconstructed from signed messages.
     List {
-        channel: String,
+        /// Optional channel to inspect; default is all readable channels.
+        channel: Option<String>,
         /// Show only tasks not marked done. This is the default.
         #[arg(long)]
         open: bool,
@@ -324,6 +355,9 @@ fn dispatch(cli: Cli) -> Result<i32> {
             cmd_post(json, &channel, &body, provenance.into())
         }
         Command::Task { command } => cmd_task(json, command),
+        Command::Console { limit, watch, watch_interval_ms } => {
+            cmd_console(json, limit, watch, watch_interval_ms)
+        }
         Command::Mention { identity, body, channel } => {
             validate_identity(&identity)?;
             validate_channel(&channel)?;
@@ -451,6 +485,24 @@ fn cmd_post(json: bool, channel: &str, body: &str, provenance: Provenance) -> Re
         println!("posted to {channel} as cursor {}", res.cursor.unwrap_or(0));
     }
     Ok(0)
+}
+
+/// Uniform error output used by new machine-readable paths.
+fn json_or_result_error(json: bool, e: &idboard_core::error::CoreError) -> Result<i32> {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": false,
+                "error": e.code.as_str(),
+                "detail": e.detail,
+                "retry_after_ms": e.retry_after_ms,
+            })
+        );
+        Ok(1)
+    } else {
+        Err(e.clone())
+    }
 }
 
 fn post_error_hint(code: idboard_core::ErrorCode) -> &'static str {
@@ -702,6 +754,9 @@ You are running as the keryx identity `{name}`.
 - `keryx dm <identity> \"<message>\"` posts to `dm/<identity>` (ACL decides who can read).
 - `keryx mention <identity> \"<message>\"` posts `mention:<identity>:...` for agents to detect.
 - `keryx notify <identity> \"<message>\"` is a concise alias for a direct-message post.
+- `keryx task` shows the open task list; `task next` picks the next unclaimed task.
+- `keryx task complete <channel> <id> --body <text>` posts a report and marks done.
+- `keryx console` is a local read-only status view (checks + board summary when inside a wrapper).
 - `keryx task create <channel> \"<title>\"` / `claim` / `done` / `list` coordinate
   work without changing the protocol; task messages are plain signed messages.
 - `keryx whoami` confirms which identity you are.
@@ -954,6 +1009,91 @@ fn cmd_cursor(json: bool, channel: &str, clear: bool, set: Option<i64>) -> Resul
     }
 }
 
+/// A task record with ordering metadata kept off the JSON wire.
+#[derive(Debug)]
+struct TaskRecord {
+    channel: String,
+    view: TaskView,
+    create_cursor: i64,
+}
+
+fn collect_tasks_from_messages(
+    messages: Vec<idboard_core::wire::StoredMessage>,
+    channel: &str,
+) -> Vec<TaskRecord> {
+    let mut tasks: std::collections::BTreeMap<String, (TaskView, i64)> = std::collections::BTreeMap::new();
+    for message in messages {
+        let Some(ev) = parse_task_event(&message.envelope.body) else { continue };
+        match ev.kind.as_str() {
+            "create" => {
+                let view = TaskView {
+                    id: ev.id.clone(),
+                    title: ev.title.unwrap_or_else(|| "(untitled)".to_string()),
+                    created_by: message.envelope.sender_id.clone(),
+                    claimed_by: None,
+                    done: false,
+                };
+                tasks.insert(ev.id.clone(), (view, message.cursor));
+            }
+            "claim" => {
+                if let Some((task, _)) = tasks.get_mut(&ev.id) {
+                    task.claimed_by = Some(message.envelope.sender_id);
+                }
+            }
+            "done" => {
+                if let Some((task, _)) = tasks.get_mut(&ev.id) {
+                    task.done = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut records: Vec<_> = tasks
+        .into_values()
+        .map(|(view, create_cursor)| TaskRecord { channel: channel.to_string(), view, create_cursor })
+        .collect();
+    records.sort_by_key(|record| record.create_cursor);
+    records
+}
+
+fn load_channel_tasks(client: &RelayClient, channel: &str) -> Result<Vec<TaskRecord>> {
+    let res = client.read(channel, 0, 1000)?;
+    Ok(collect_tasks_from_messages(res.messages, channel))
+}
+
+fn load_tasks(client: &RelayClient, channels: &[String]) -> Result<(String, Vec<TaskRecord>)> {
+    let identity = client.whoami()?.identity;
+    let mut records = Vec::new();
+    for channel in channels {
+        records.extend(load_channel_tasks(client, channel)?);
+    }
+    records.sort_by_key(|record| record.create_cursor);
+    Ok((identity, records))
+}
+
+fn visible_readable_channels(client: &RelayClient) -> Result<Vec<String>> {
+    Ok(client
+        .inbox(0)?
+        .channels
+        .into_iter()
+        .filter(|digest| digest.can_read)
+        .map(|digest| digest.channel)
+        .collect())
+}
+
+fn task_json(task: &'_ TaskRecord) -> serde_json::Value {
+    serde_json::json!({
+        "channel": task.channel,
+        "id": task.view.id,
+        "title": task.view.title,
+        "created_by": task.view.created_by,
+        "claimed_by": task.view.claimed_by,
+        "done": task.view.done,
+    })
+}
+
+
 /// Task messages are an ordinary channel convention, not a new protocol type.
 ///
 /// Format: `task:{"v":1,...}` on a normal signed message. This keeps old boards
@@ -976,7 +1116,8 @@ struct TaskView {
     done: bool,
 }
 
-fn cmd_task(json: bool, command: TaskCommand) -> Result<i32> {
+fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
+    let command = command.unwrap_or(TaskCommand::List { channel: None, open: true, all: false, mine: false });
     match command {
         TaskCommand::Create { channel, title, body } => {
             validate_channel(&channel)?;
@@ -1037,53 +1178,98 @@ fn cmd_task(json: bool, command: TaskCommand) -> Result<i32> {
             cmd_post(json, &channel, &format!("task:{}", body), Provenance::SelfOriginated)
         }
         TaskCommand::List { channel, open: _, all, mine } => {
-            validate_channel(&channel)?;
-            let client = RelayClient::from_env()?;
-            let identity = client.whoami()?.identity;
-            let res = client.read(&channel, 0, 1000)?;
-            let mut tasks: std::collections::BTreeMap<String, TaskView> = std::collections::BTreeMap::new();
-            for m in res.messages {
-                let Some(ev) = parse_task_event(&m.envelope.body) else { continue };
-                match ev.kind.as_str() {
-                    "create" => {
-                        let view = TaskView {
-                            id: ev.id.clone(),
-                            title: ev.title.unwrap_or_else(|| "(untitled)".to_string()),
-                            created_by: m.envelope.sender_id.clone(),
-                            claimed_by: None,
-                            done: false,
-                        };
-                        tasks.insert(ev.id.clone(), view);
-                    }
-                    "claim" => {
-                        if let Some(task) = tasks.get_mut(&ev.id) {
-                            task.claimed_by = Some(m.envelope.sender_id);
-                        }
-                    }
-                    "done" => {
-                        if let Some(task) = tasks.get_mut(&ev.id) {
-                            task.done = true;
-                        }
-                    }
-                    _ => {}
-                }
+            if channel.as_ref().is_some_and(|channel| validate_channel(channel).is_err()) {
+                return Err(idboard_core::error::CoreError::bad_request("invalid channel"));
             }
-            let mut out: Vec<_> = tasks.into_values().collect();
+            let client = RelayClient::from_env()?;
+            let channels = match channel {
+                Some(channel) => vec![channel],
+                None => visible_readable_channels(&client)?,
+            };
+            let (identity, mut records) = load_tasks(&client, &channels)?;
             if !all {
-                out.retain(|t| !t.done);
+                records.retain(|record| !record.view.done);
             }
             if mine {
-                out.retain(|t| t.created_by == identity || t.claimed_by.as_deref() == Some(identity.as_str()));
+                records.retain(|record| {
+                    record.view.created_by == identity || record.view.claimed_by.as_deref() == Some(identity.as_str())
+                });
             }
             if json {
-                println!("{}", serde_json::json!({ "channel": channel, "tasks": out }));
-            } else if out.is_empty() {
-                eprintln!("no tasks in {channel}");
+                let tasks: Vec<serde_json::Value> = records.iter().map(task_json).collect();
+                println!("{}", serde_json::json!({ "tasks": tasks }));
+            } else if records.is_empty() {
+                eprintln!("no tasks");
             } else {
-                for task in out {
-                    let claimed = task.claimed_by.unwrap_or_else(|| "unclaimed".into());
-                    println!("{} {} {} (creator {}, claimed {claimed})", if task.done { "done" } else { "open" }, task.id, task.title, task.created_by);
+                for record in records {
+                    let claimed = record.view.claimed_by.unwrap_or_else(|| "unclaimed".into());
+                    println!(
+                        "{} {} {} {} (creator {}, claimed {claimed})",
+                        if record.view.done { "done" } else { "open" },
+                        record.channel,
+                        record.view.id,
+                        record.view.title,
+                        record.view.created_by
+                    );
                 }
+            }
+            Ok(0)
+        }
+        TaskCommand::Next { channel } => {
+            if channel.as_ref().is_some_and(|channel| validate_channel(channel).is_err()) {
+                return Err(idboard_core::error::CoreError::bad_request("invalid channel"));
+            }
+            let client = RelayClient::from_env()?;
+            let channels = match channel {
+                Some(channel) => vec![channel],
+                None => visible_readable_channels(&client)?,
+            };
+            let (_, records) = load_tasks(&client, &channels)?;
+            let next = records
+                .into_iter()
+                .find(|record| !record.view.done && record.view.claimed_by.is_none());
+            if json {
+                println!("{}", match &next {
+                    Some(record) => serde_json::json!({ "next": task_json(record) }),
+                    None => serde_json::json!({ "next": serde_json::Value::Null }),
+                });
+                return Ok(0);
+            }
+            let Some(next) = next else {
+                eprintln!("no unclaimed open tasks");
+                return Ok(0);
+            };
+            println!("next task {} in {}: {}", next.view.id, next.channel, next.view.title);
+            println!("claim: keryx task claim {} {}", next.channel, next.view.id);
+            Ok(0)
+        }
+        TaskCommand::Complete { channel, task_id, body, body_file } => {
+            validate_channel(&channel)?;
+            let body = read_body(body.as_deref(), body_file.as_deref())?;
+            let client = RelayClient::from_env()?;
+            let post_body = |body: &str| client.post(&channel, body, Provenance::SelfOriginated);
+            let report = match post_body(&body) {
+                Ok(res) => res,
+                Err(e) => return json_or_result_error(json, &e),
+            };
+            let done_body = format!("task:{{\"v\":1,\"id\":\"{task_id}\",\"kind\":\"done\"}}");
+            let done = match post_body(&done_body) {
+                Ok(res) => res,
+                Err(e) => return json_or_result_error(json, &e),
+            };
+            if json {
+                println!("{}", serde_json::json!({
+                    "ok": true,
+                    "task_id": task_id,
+                    "report_cursor": report.cursor,
+                    "done_cursor": done.cursor,
+                }));
+            } else {
+                println!(
+                    "posted report as cursor {} and marked task {task_id} done as cursor {}",
+                    report.cursor.unwrap_or(0),
+                    done.cursor.unwrap_or(0)
+                );
             }
             Ok(0)
         }
@@ -1096,14 +1282,28 @@ fn parse_task_event(body: &str) -> Option<TaskEvent> {
 }
 
 
-///
-/// This does not create or repair anything. It reports what is wrong so an
-/// operator (or an agent's shell) can act on it without guessing whether the
-/// failure is the config, the keystore, the socket or the wrapper.
-fn cmd_doctor(json: bool) -> Result<i32> {
+/// Collect the same checks `doctor` relies on so console and future diagnostics
+/// share one implementation.
+fn collect_doctor_checks() -> Vec<serde_json::Value> {
     let mut checks = Vec::new();
     let home = layout::idboard_home();
     let config_path = layout::config_path();
+
+    // An agent child intentionally loses IDBOARD_HOME/CONFIG/DAEMON. Those are
+    // outside its trust boundary, so "missing config" is expected there — not a
+    // local health failure.
+    let in_wrapper = std::env::var_os(idboard_core::layout::ENV_RELAY).is_some()
+        && std::env::var_os(idboard_core::layout::ENV_TOKEN).is_some();
+    if in_wrapper {
+        match RelayClient::from_env().and_then(|client| client.whoami()) {
+            Ok(id) => checks.push(serde_json::json!({ "name": "wrapper", "ok": true, "detail": format!("identity {}, wrapper pid {}", id.identity, id.pid) })),
+            Err(e) => {
+                let detail = e.detail;
+                checks.push(serde_json::json!({ "name": "wrapper", "ok": false, "detail": detail.clone() }));
+            }
+        }
+        return checks;
+    }
 
     match std::fs::metadata(&home) {
         Ok(md) if md.is_dir() => {
@@ -1178,6 +1378,10 @@ fn cmd_doctor(json: bool) -> Result<i32> {
         Err(_) => checks.push(serde_json::json!({ "name": "wrapper", "ok": true, "detail": "not inside a wrapper; this is expected outside `keryx run`" })),
     }
 
+    checks
+}
+
+fn summarize_doctor_checks(checks: &[serde_json::Value]) -> (Vec<serde_json::Value>, bool) {
     let problems: Vec<serde_json::Value> = checks
         .iter()
         .filter(|check| !check["ok"].as_bool().unwrap_or(false))
@@ -1187,6 +1391,12 @@ fn cmd_doctor(json: bool) -> Result<i32> {
         }))
         .collect();
     let ok = problems.is_empty();
+    (problems, ok)
+}
+
+fn cmd_doctor(json: bool) -> Result<i32> {
+    let checks = collect_doctor_checks();
+    let (problems, ok) = summarize_doctor_checks(&checks);
     if json {
         println!("{}", serde_json::json!({
             "ok": ok,
@@ -1203,6 +1413,139 @@ fn cmd_doctor(json: bool) -> Result<i32> {
         }
     }
     Ok(if ok { 0 } else { 1 })
+}
+
+/// Read-only aggregate for humans and agents.
+///
+/// Local checks always run. Board-visible state is included only inside a
+/// wrapper, because board reads require the wrapper's signing path.
+fn cmd_console(json: bool, limit: u32, watch: bool, watch_interval_ms: u64) -> Result<i32> {
+    let interval = Duration::from_millis(watch_interval_ms.max(10));
+
+    loop {
+        let checks = collect_doctor_checks();
+        let (problems, local_ok) = summarize_doctor_checks(&checks);
+        let board = board_summary(limit);
+        let ok = local_ok;
+
+        if json {
+            println!("{}", serde_json::json!({
+                "ok": ok,
+                "report_version": 1,
+                "checks": checks,
+                "problems": problems,
+                "board": board,
+            }));
+        } else {
+            println!("keryx console: {}", if ok { "ok" } else { "attention" });
+            println!("local:");
+            for check in &checks {
+                let name = check["name"].as_str().unwrap_or("check");
+                let status = if check["ok"].as_bool().unwrap_or(false) { "ok" } else { "FAIL" };
+                println!("  {status:<4} {name}: {}", check["detail"].as_str().unwrap_or(""));
+            }
+            if board["available"].as_bool().unwrap_or(false) {
+                let identity = board["identity"].as_str().unwrap_or("unknown");
+                println!("board:");
+                println!("  identity: {identity}");
+                println!("  channels: {}", board["channels"].as_array().map(|c| c.len()).unwrap_or(0));
+                println!(
+                    "  tasks: {} open, {} claimed, {} done",
+                    board["tasks"]["open"].as_u64().unwrap_or(0),
+                    board["tasks"]["claimed"].as_u64().unwrap_or(0),
+                    board["tasks"]["done"].as_u64().unwrap_or(0)
+                );
+                let recent = board["recent"].as_array().map(|v| v.as_slice()).unwrap_or(&[]);
+                if !recent.is_empty() {
+                    println!("  recent messages:");
+                    for m in recent {
+                        println!(
+                            "    [{} cursor {}] {}",
+                            m["channel"].as_str().unwrap_or("?"),
+                            m["cursor"].as_i64().unwrap_or(0),
+                            render_message(
+                                m["sender"].as_str().unwrap_or("?"),
+                                m["cursor"].as_i64().unwrap_or(0),
+                                &Provenance::SelfOriginated,
+                                m["body"].as_str().unwrap_or(""),
+                            )
+                        );
+                    }
+                }
+            } else {
+                println!("board: unavailable outside `keryx run`; local summary still shown");
+            }
+        }
+        if !watch {
+            return Ok(if ok { 0 } else { 1 });
+        }
+        println!("---");
+        std::thread::sleep(interval);
+    }
+}
+
+fn board_summary(limit: u32) -> serde_json::Value {
+    let Ok(client) = RelayClient::from_env() else {
+        return serde_json::json!({ "available": false });
+    };
+    let Ok(identity) = client.whoami().map(|id| id.identity) else {
+        return serde_json::json!({ "available": false });
+    };
+    let inbox = match client.inbox(limit) {
+        Ok(res) => res,
+        Err(e) => return serde_json::json!({ "available": false, "why": e.detail }),
+    };
+    let channels = inbox.channels;
+    let mut task_open = 0;
+    let mut task_claimed = 0;
+    let mut task_done = 0;
+    for digest in &channels {
+        if !digest.can_read {
+            continue;
+        }
+        if let Ok(tasks) = load_channel_tasks(&client, &digest.channel) {
+            for record in tasks {
+                if record.view.done {
+                    task_done += 1;
+                } else if record.view.claimed_by.is_some() {
+                    task_claimed += 1;
+                } else {
+                    task_open += 1;
+                }
+            }
+        }
+    }
+
+    let mut recent: Vec<(i64, serde_json::Value)> = Vec::new();
+    for digest in &channels {
+        for message in &digest.messages {
+            recent.push((
+                message.cursor,
+                serde_json::json!({
+                    "channel": digest.channel,
+                    "cursor": message.cursor,
+                    "sender": message.envelope.sender_id,
+                    "body": message.envelope.body,
+                }),
+            ));
+        }
+    }
+    recent.sort_by(|a, b| b.0.cmp(&a.0));
+    let recent: Vec<_> = recent.into_iter().take(limit as usize).map(|(_, v)| v).collect();
+
+    serde_json::json!({
+        "available": true,
+        "identity": identity,
+        "channels": channels.iter().map(|digest| serde_json::json!({
+            "channel": digest.channel,
+            "can_read": digest.can_read,
+            "can_post": digest.can_post,
+            "cursor": digest.cursor,
+            "messages": digest.messages.len(),
+        })).collect::<Vec<_>>(),
+        "tasks": { "open": task_open, "claimed": task_claimed, "done": task_done },
+        "recent": recent,
+    })
 }
 
 fn cmd_whoami(json: bool) -> Result<i32> {

@@ -1541,6 +1541,66 @@ fn task_create_claim_done_and_list_use_plain_board_messages() {
 }
 
 #[test]
+fn task_next_and_complete_make_the_whole_agent_flow_one_step() {
+    let b = TestBoard::start();
+
+    let created = b.as_identity("eng-01", &["task", "create", "general", "UX console task"]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let created_out = String::from_utf8_lossy(&created.stdout);
+    let task_id = created_out
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id")
+        .trim_end_matches(['\n'])
+        .to_string();
+
+    let next = b.as_identity("eng-01", &["task", "next", "general"]);
+    let stdout = String::from_utf8_lossy(&next.stdout);
+    assert!(next.status.success(), "{}", String::from_utf8_lossy(&next.stderr));
+    assert!(stdout.contains("task claim"), "{stdout}");
+
+    let complete = b.as_identity("eng-01", &["task", "complete", "general", &task_id, "--body", "completed by agent"]);
+    assert!(complete.status.success(), "{}", String::from_utf8_lossy(&complete.stderr));
+
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--all", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let tasks = v["tasks"].as_array().unwrap();
+    assert!(tasks.iter().any(|t| t["id"] == task_id && t["done"] == true));
+
+    let transcript_out = b.read("eng-01", "general", "0");
+    let transcript = String::from_utf8_lossy(&transcript_out.stdout);
+    assert!(transcript.contains("completed by agent"), "{transcript}");
+}
+
+#[test]
+fn console_shows_local_and_board_state() {
+    let b = TestBoard::start();
+
+    let inside = b.as_identity("eng-01", &["console"]);
+    let stdout = String::from_utf8_lossy(&inside.stdout);
+    assert!(
+        inside.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&inside.stderr)
+    );
+    assert!(stdout.contains("keryx console: ok"), "{stdout}");
+    assert!(stdout.contains("identity: eng-01"), "{stdout}");
+    assert!(stdout.contains("tasks:"), "{stdout}");
+
+    let outside = b.keryx(&["console"]);
+    let stdout = String::from_utf8_lossy(&outside.stdout);
+    assert!(outside.status.success(), "{}", String::from_utf8_lossy(&outside.stderr));
+    assert!(stdout.contains("keryx console: ok"), "{stdout}");
+    assert!(stdout.contains("board: unavailable outside"), "{stdout}");
+
+    let inside_json = b.as_identity("eng-01", &["console", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&inside_json.stdout).expect("console --json must be JSON");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["report_version"], 1);
+    assert!(v["board"]["available"].as_bool().unwrap());
+}
+
+#[test]
 fn mention_and_structured_subscribe_stops_on_json_field() {
     let b = TestBoard::start();
 

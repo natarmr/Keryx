@@ -22,7 +22,16 @@ mod cli;
 use cli::clamp_code;
 
 fn main() -> std::process::ExitCode {
-    match cli::run() {
+    // clap parse of the 41-variant Command enum creates a ~1-2 MB stack frame
+    // in debug builds, which overflows the default 1 MB Windows stack. Run the
+    // whole CLI on an explicitly sized thread instead of relying on a linker
+    // /STACK flag. The flag is removed from .cargo/config.toml.
+    let handle = std::thread::Builder::new()
+        .name("keryx-main".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| cli::run())
+        .expect("spawn keryx-main thread");
+    match handle.join().expect("keryx-main thread panicked") {
         Ok(code) => std::process::ExitCode::from(clamp_code(code)),
         Err(e) => {
             eprintln!("keryx: {e}");

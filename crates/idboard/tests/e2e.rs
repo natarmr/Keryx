@@ -3027,6 +3027,41 @@ fn admin_recent_reuses_the_read_path() {
 }
 
 #[test]
+fn the_help_flag_exits_zero_without_extra_stack() {
+    // G1: keryx --help must not overflow the default 1 MB Windows stack.
+    // The binary now runs cli::run on an 8 MB thread inside main.rs instead
+    // of relying on .cargo/config.toml /STACK. This test spawns the real
+    // binary (sibling in target/debug) and asserts exit 0 for both --help
+    // and instructions, so a regression is caught without cargo test's own
+    // stack.
+    for args in [vec!["--help"], vec!["instructions"], vec!["instructions", "--all"]] {
+        let out = std::process::Command::new(sibling_bin("keryx"))
+            .args(&args)
+            .output()
+            .expect("spawn keryx");
+        assert!(
+            out.status.success(),
+            "keryx {} must exit 0 without extra stack: status {:?} stderr {}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // idboard is the compatibility alias over the same binary
+        let out = std::process::Command::new(sibling_bin("idboard"))
+            .args(&args)
+            .output()
+            .expect("spawn idboard");
+        assert!(
+            out.status.success(),
+            "idboard {} must exit 0: status {:?} stderr {}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
 fn web_data_shape_carries_operator_fields() {
     let b = TestBoard::start();
     assert_eq!(b.post("eng-01", "general", "operator age probe").status.code(), Some(0));

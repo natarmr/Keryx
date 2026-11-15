@@ -660,14 +660,13 @@ cargo test --workspace
 .\scripts\harness-smoke.ps1
 ```
 
-The suite is 333 distinct test functions: 261 unit tests over the envelope, ACL
+The suite is 356 distinct test functions: 278 unit tests over the envelope, ACL
 matrix, storage, framing, the MCP server, task folding, and the wrapper's child
-environment, and 72 end-to-end tests. 331 run by default; the only 2 `#[ignore]`d
+environment, and 78 end-to-end tests. 354 run by default; the only 2 `#[ignore]`d
 tests are the live-harness smokes in `crates/idboard/tests/e2e.rs`, which are
 gated on `IDBOARD_LIVE_HARNESS` and need a model, a network, and money. (A naive
-sum of the per-target counts prints 379, because `idboard`/`keryx` and
-`idboardd`/`keryxd` are two binary targets over the same source: `idboard`'s 46
-CLI tests are compiled twice.) The e2e tests spawn the real
+sum of the per-target counts prints 406, because `idboard`/`keryx` are two binary
+targets over the same source: `idboard`'s 50 CLI tests are compiled twice.) The e2e tests spawn the real
 `keryx` and `keryxd` binaries, open real sockets, and attack the board with
 forged senders, replayed envelopes, tampered bodies, and signatures from the
 wrong key. Every rejection is asserted as a *specific* error code, never merely

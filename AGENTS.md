@@ -18,18 +18,18 @@ This tree is a git repository. `cargo test --workspace` is the gate; there is no
 
 ```sh
 cargo build --workspace      # REQUIRED before the e2e suite - see below
-cargo test --workspace       # 333 tests, ~60s   <-- this is the normal path
+cargo test --workspace       # 356 tests, ~60s   <-- this is the normal path
 .\scripts\check-custody.ps1 # read-only: who can reach the trust root and the socket
 .\scripts\check-custody-claims.ps1 # do the custody statements still tell the truth?
 .\scripts\harness-smoke.ps1 # opt-in: drive a real agent harness (costs tokens)
 ```
 
-333 = 261 unit + 72 e2e (331 pass, 2 `#[ignore]`d live-harness tests, both in
+356 = 278 unit + 78 e2e (354 pass, 2 `#[ignore]`d live-harness tests, both in
 `crates/idboard/tests/e2e.rs` and gated on `IDBOARD_LIVE_HARNESS`; there are no
-ignored unit tests). A naive per-target sum prints 379 because `idboard`/`keryx`
-are two bin targets over the same source, so `idboard`'s 46 CLI tests are counted
+ignored unit tests). A naive per-target sum prints 406 because `idboard`/`keryx`
+are two bin targets over the same source, so `idboard`'s 50 CLI tests are counted
 twice. The slow half is
-`idboard-core`'s 46 tests at ~8-20s (key generation) and e2e at ~21s; everything else is
+`idboard-core`'s 48 tests at ~8-20s (key generation) and e2e at ~21s; everything else is
 under a second. A passing run prints only `test result: ok`
 lines and the rejections e2e *expects* on stderr — daemon-unreachable and wrapper-gone
 lines are test output, not failures. There is no CI, no pre-commit hook, and no formatter

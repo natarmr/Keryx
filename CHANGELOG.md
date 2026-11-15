@@ -25,12 +25,12 @@ compatible unless noted.
   identity argument.
 
 ### Verified
-- `cargo test --workspace`: 333 distinct test functions — 261 unit + 72
-  end-to-end — of which 331 run by default and 2 are marked `#[ignore]`
+- `cargo test --workspace`: 356 distinct test functions — 278 unit + 78
+  end-to-end — of which 354 run by default and 2 are marked `#[ignore]`
   (live-harness smokes, both in `crates/idboard/tests/e2e.rs`, gated on
   `IDBOARD_LIVE_HARNESS`). There are no ignored unit tests. A naive per-target
-  sum prints 379 because `idboard`/`keryx` are two bin targets over the same
-  source, so `idboard`'s 46 CLI tests are counted twice.
+  sum prints 406 because `idboard`/`keryx` are two bin targets over the same
+  source, so `idboard`'s 50 CLI tests are counted twice.
 
 ## [1.0.0] - 2026-11-15
 

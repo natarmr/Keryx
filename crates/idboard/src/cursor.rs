@@ -5,12 +5,15 @@
 //! A malicious or stale file can only lead a caller to re-read messages it was
 //! already allowed to read, or to skip nothing that matters.
 //!
-//! Missing, unreadable and corrupt entries are reported rather than silently
-//! treated as `0`: a zero cursor means "from the beginning", and an operator
-//! should choose that explicitly when that is what they want.
+//! A *missing* file is not an error: it is the first use of `--since-last`, and
+//! there is no position to resume from yet, so the caller starts at `0`. A file
+//! that is present but unreadable, corrupt, not a regular file, or absurdly
+//! large is reported instead: a zero cursor means "from the beginning", and an
+//! operator should choose that explicitly when that is what they want.
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use idboard_core::error::{CoreError, Result};
@@ -20,6 +23,16 @@ use idboard_core::layout;
 struct FileCursors {
     cursors: BTreeMap<String, i64>,
 }
+
+/// Largest cursor file this will read.
+///
+/// One entry is a channel name plus an `i64`, and channels are declared in the
+/// config, so a real file is a few hundred bytes. The bound exists because the
+/// file is writable by the agent the wrapper spawned — `KERYX_CURSOR_HOME` is
+/// passed through on purpose — and `read_to_string` would otherwise allocate
+/// whatever size that agent chose. An unbounded read is a way to abort the next
+/// `keryx read` in the same wrapper.
+const CURSOR_FILE_MAX_BYTES: u64 = 1024 * 1024;
 
 /// A per-identity store kept under the keryx state root.
 #[derive(Debug)]
@@ -54,7 +67,36 @@ impl CursorStore {
             )));
         }
         let path = cursor_root().join(format!("{identity}.json"));
-        let cursors = if path.exists() { Self::load(&path)? } else { BTreeMap::new() };
+        // Inspect before reading. `metadata` follows a symlink, so a link to a
+        // FIFO or a device is caught here too: reading a FIFO blocks until a
+        // writer appears, which is a hang, and a device has no meaningful
+        // length. A missing file is the ordinary first-run case.
+        let cursors = match fs::metadata(&path) {
+            Ok(meta) => {
+                if !meta.is_file() {
+                    return Err(CoreError::bad_request(format!(
+                        "cursor file {} is not a regular file; remove it and pass --since instead",
+                        path.display()
+                    )));
+                }
+                if meta.len() > CURSOR_FILE_MAX_BYTES {
+                    return Err(CoreError::bad_request(format!(
+                        "cursor file {} is {} bytes, limit is {CURSOR_FILE_MAX_BYTES}; \
+                         remove it and pass --since instead",
+                        path.display(),
+                        meta.len()
+                    )));
+                }
+                Self::load(&path)?
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(e) => {
+                return Err(CoreError::bad_request(format!(
+                    "cannot inspect cursor file {}: {e}; pass --since instead",
+                    path.display()
+                )));
+            }
+        };
         Ok(Self { path, cursors, dirty: false })
     }
 
@@ -105,9 +147,19 @@ impl CursorStore {
         let text = serde_json::to_string_pretty(&FileCursors { cursors: self.cursors.clone() })
             .map_err(|e| CoreError::internal(format!("failed to serialise cursors: {e}")))?;
         let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, text).map_err(|e| {
+        // Remove any stale entry first, then create the file exclusively.
+        // `fs::write` alone would follow a symlink left here (redirecting the
+        // cursor write into another file) and would block forever on a FIFO.
+        // Both are creatable by the agent the wrapper spawned, so the temp path
+        // gets the same "regular file only" discipline as the cursor path.
+        let _ = fs::remove_file(&tmp);
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e| {
+            CoreError::internal(format!("failed to create {}: {e}", tmp.display()))
+        })?;
+        file.write_all(text.as_bytes()).map_err(|e| {
             CoreError::internal(format!("failed to write {}: {e}", tmp.display()))
         })?;
+        drop(file);
         fs::rename(&tmp, &self.path).map_err(|e| {
             CoreError::internal(format!(
                 "failed to install cursor file {} from {}: {e}",
@@ -169,5 +221,80 @@ mod tests {
         let err = CursorStore::for_identity("eng-01").unwrap_err();
         assert_eq!(err.code, idboard_core::ErrorCode::BadRequest);
         assert!(!err.detail.is_empty());
+    }
+
+    /// A missing file is the first `--since-last`, not an error: there is no
+    /// position to resume from yet, so the caller starts at the beginning.
+    #[test]
+    fn a_missing_cursor_file_starts_at_the_beginning() {
+        let _guard = crate::lock::tests::env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IDBOARD_HOME", tmp.path()) };
+
+        let store = CursorStore::for_identity("eng-01").unwrap();
+        assert_eq!(store.get("general"), 0);
+        assert!(!tmp.path().join("cursors").join("eng-01.json").exists());
+    }
+
+    /// The file is writable by the agent the wrapper spawned, so its size is
+    /// that agent's choice. It must be refused before it is read: the point of
+    /// the bound is that the allocation never happens.
+    #[test]
+    fn an_oversized_cursor_file_is_refused_before_it_is_read() {
+        let _guard = crate::lock::tests::env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IDBOARD_HOME", tmp.path()) };
+
+        let dir = tmp.path().join("cursors");
+        fs::create_dir_all(&dir).unwrap();
+        // Valid JSON, so a successful parse would prove it had been read. The
+        // padding alone pushes it over the limit.
+        let mut text = String::from(r#"{"cursors":{"general":1}}"#);
+        text.push_str(&" ".repeat(CURSOR_FILE_MAX_BYTES as usize));
+        fs::write(dir.join("eng-01.json"), text).unwrap();
+
+        let err = CursorStore::for_identity("eng-01").unwrap_err();
+        assert_eq!(err.code, idboard_core::ErrorCode::BadRequest);
+    }
+
+    /// A directory at the path must be a refusal, not a read that fails
+    /// obscurely. On Unix the same guard rejects a FIFO, which would otherwise
+    /// block the CLI forever waiting for a writer.
+    #[test]
+    fn a_cursor_path_that_is_not_a_regular_file_is_refused() {
+        let _guard = crate::lock::tests::env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IDBOARD_HOME", tmp.path()) };
+
+        let path = tmp.path().join("cursors").join("eng-01.json");
+        fs::create_dir_all(&path).unwrap();
+
+        let err = CursorStore::for_identity("eng-01").unwrap_err();
+        assert_eq!(err.code, idboard_core::ErrorCode::BadRequest);
+    }
+
+    /// A stale entry at the temp path is replaced, never merged into the file.
+    ///
+    /// A regular file is the portable stand-in for the shapes that matter — a
+    /// symlink (which `fs::write` would follow) and a FIFO (which it would
+    /// block on) — both creatable by the agent, and both rejected by the
+    /// remove-then-`create_new` sequence in `flush`.
+    #[test]
+    fn flush_replaces_a_stale_entry_at_the_temp_path() {
+        let _guard = crate::lock::tests::env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IDBOARD_HOME", tmp.path()) };
+
+        let dir = tmp.path().join("cursors");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("eng-01.json.tmp"), "stale").unwrap();
+
+        let mut store = CursorStore::for_identity("eng-01").unwrap();
+        store.set("general", 7);
+        store.flush().unwrap();
+
+        let text = fs::read_to_string(dir.join("eng-01.json")).unwrap();
+        assert!(text.contains("\"general\": 7"), "{text}");
+        assert!(!text.contains("stale"), "the stale temp entry leaked into the file: {text}");
     }
 }

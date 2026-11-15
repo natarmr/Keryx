@@ -373,7 +373,11 @@ stdio MCP server that inherits the wrapper's relay when launched inside
 `read`, `peers`) plus the agent loop (`tasks`, `task_claim`, `task_done`,
 `next_task`, `replay`) — all through the same relay calls the CLI makes, so an
 MCP-only harness can discover work, claim it, report it done, and replay
-history without shelling out. See `docs/harnesses.md` for what has been
+history without shelling out. No tool takes an `identity`, `sender` or `token`
+argument: the sender is the relay handshake's identity, and the wrapper signs
+for it. An argument by those names is ignored rather than honoured, because
+honouring one would be a second way to choose who posts. See
+`docs/harnesses.md` for what has been
 verified on this machine, what cannot be driven headlessly, and why.
 
 ---

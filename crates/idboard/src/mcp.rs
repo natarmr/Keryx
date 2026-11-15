@@ -1060,6 +1060,74 @@ mod tests {
         assert_eq!(response_value(&line)["error"]["code"], INVALID_PARAMS);
     }
 
+    /// The four task tools added after the first four must not become a second
+    /// way to pick a sender.
+    ///
+    /// The structural guarantee is that [`Backend::post`] has no sender
+    /// parameter at all: the relay handshake decides it, and the wrapper fills
+    /// it in. This test pins the other half — that a caller-supplied `identity`
+    /// or `token` is neither honoured nor echoed, on every tool that posts or
+    /// reads. A schema without the property is not enough on its own, because
+    /// the server does not reject unknown arguments; it ignores them.
+    #[test]
+    fn task_tools_ignore_identity_and_token_arguments() {
+        let stub = Stub::with_messages(vec![task_message(
+            1,
+            r#"task:{"v":1,"id":"t-7","kind":"create","title":"claimed work"}"#,
+        )]);
+        let spoof = serde_json::json!({
+            "identity": "lead",
+            "token": "attacker-token",
+            "sender": "lead",
+            "seq": 1,
+            "nonce": "n",
+            "signature": "s",
+        });
+
+        let mut with = |name: &str, mut args: serde_json::Value| {
+            for (key, value) in spoof.as_object().unwrap() {
+                args[key] = value.clone();
+            }
+            handle_line(&call_tool_line(name, args), &stub).unwrap()
+        };
+
+        let claim = response_value(&with(
+            "task_claim",
+            serde_json::json!({ "channel": "general", "task_id": "t-7", "lease": "5m" }),
+        ));
+        assert_eq!(claim["result"]["isError"], false, "{claim}");
+
+        let done = response_value(&with(
+            "task_done",
+            serde_json::json!({ "channel": "general", "task_id": "t-7", "report": "finished", "result": "ok" }),
+        ));
+        assert_eq!(done["result"]["isError"], false, "{done}");
+
+        let next = response_value(&with("next_task", serde_json::json!({ "channel": "general" })));
+        assert_eq!(next["result"]["isError"], false, "{next}");
+
+        let replay = response_value(&with("replay", serde_json::json!({ "channel": "general", "task": "t-7" })));
+        assert_eq!(replay["result"]["isError"], false, "{replay}");
+
+        // Every post went through the relay as this identity's own message, and
+        // nothing a caller supplied reached the wire.
+        let calls = stub.calls.borrow().clone();
+        let posts: Vec<&String> = calls.iter().filter(|c| c.starts_with("post ")).collect();
+        assert!(!posts.is_empty(), "the task tools must actually post: {calls:?}");
+        for call in &posts {
+            assert!(call.ends_with("SelfOriginated"), "a task post must stay self-originated: {call}");
+            for spoofed in ["lead", "attacker-token", "signature"] {
+                assert!(!call.contains(spoofed), "{spoofed} reached the wire: {call}");
+            }
+        }
+
+        // And no answer echoes the claim back as if it had been honoured.
+        for answer in [&claim, &done, &next, &replay] {
+            let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(!text.contains("attacker-token"), "a token argument reached the answer: {text}");
+        }
+    }
+
     #[test]
     fn a_board_refusal_is_a_tool_error_the_model_can_read() {
         let stub = Stub::failing(idboard_core::ErrorCode::Unauthorized);

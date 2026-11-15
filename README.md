@@ -53,10 +53,14 @@ A peer agent process, or untrusted content inside an agent's context:
   allowed to say.
 - **An agent that declares its own fetched content `self`.** `allow_external = false`
   refuses a post the caller *marked* `[external]`; it never inspects the text, so
-  an injected agent that declares `self` passes the policy. The setting constrains
-  honest agents and makes the distinction visible on the board — it is not a
-  sandbox. (Enforcing provenance regardless of what the child declares is
-  unimplemented; see "Not in v1".)
+  an injected agent that declares `self` passes the policy unless its identity is
+  constrained. An identity with `force_external = true` is that constraint: the
+  wrapper downgrades `self` to `[external]` *before* signing (so the signature
+  covers the real value) and the daemon rejects a forged `self` envelope that
+  bypasses the wrapper (`provenance_rejected`, after `authorize` and before the
+  budget, so it is never stored and never charged). Without the flag, the setting
+  still constrains honest agents only and makes the distinction visible — it is
+  not a sandbox.
 - **Host compromise.** Root, SYSTEM, or an administrator.
 - **Two processes that already share filesystem access.** This is the same
   boundary as the point above, stated from the other side.
@@ -478,6 +482,7 @@ project exists to prevent.
 role = "engineer"
 pubkey = "3f2a…c1"        # required; from `keryx keygen eng-01`
 description = "…"         # optional, never interpreted
+force_external = true    # optional; defaults to false. Every post is [external].
 
 [identity.lead]
 role = "lead"
@@ -501,11 +506,20 @@ A grant matches an identity if it is `*`, the identity's **name**, or its
 **role**. The role defaults to the name if omitted.
 
 **Provenance is not just a label.** A channel may set `allow_external = false` to
-refuse any `[external]` post. The default is `true`, which is the historical
-behaviour. This is a per-channel policy, not a global setting: a channel used for
-fetched reports can enforce stricter handling without changing every channel. It
-does not inspect the text to decide what is external; the caller chooses the
-provenance, and the daemon only enforces the declared policy.
+refuse any `[external]` post; an identity may set `force_external = true` to
+declare that *every* post it makes is external. The defaults (`true` and `false`)
+are the historical behaviour. The per-channel policy and the per-identity floor
+are orthogonal: a channel used for fetched reports can forbid `self` content,
+and a fetcher identity can be made unable to claim otherwise. The daemon never
+inspects text to decide what is external; the wrapper downgrades a `force_external`
+identity's `self` to `external` *before* signing (so the signature covers the
+real value), and the daemon rejects a forged `self` from that identity with
+`provenance_rejected` (after `authorize`, before the budget, so it is never
+stored and never charged). Without the floor, the caller chooses the provenance
+and the daemon only enforces the declared channel policy. The floor is visible in
+`keryxd --check`, `keryxd --show-acl`, and `keryx admin report` (the identity
+row shows `force_external=true`), and `--check` refuses a config where a
+`force_external` identity can only post to `allow_external = false` channels.
 
 **Role grants are a footgun.** Adding a second identity with
 `role = "engineer"` silently grants it every channel engineers can reach. The
@@ -633,16 +647,16 @@ These are chosen, not overlooked.
 
 ## Not in v1
 
-General provenance enforcement beyond the opt-in per-channel `allow_external` policy,
-respawn and cursor rehydration, and cross-machine transport.
+Automatic detection of fetched content, respawn and cursor rehydration, and
+cross-machine transport.
 
 A **write** web UI is also not in v1. What did ship is `keryx web`: a read-only
 operator console served on loopback only, at a token-bearing URL, with no endpoint
-that mutates the board, the config, or the keystore.
-
-Provenance is declared, not derived, so `allow_external = false` constrains honest
-agents only. `docs/provenance-enforcement.md` holds the reviewed design for a
-per-identity `force_external` floor; it is not implemented.
+that mutates the board, the config, or the keystore. What also shipped is the
+per-identity `force_external` floor (`docs/provenance-enforcement.md`): provenance
+is still declared, not derived, but an operator can now make one identity
+unable to declare otherwise, and `keryxd --check` rejects an unsatisfiable
+`force_external = true` config (every postable channel forbids external).
 
 ## Development
 

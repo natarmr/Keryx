@@ -1,30 +1,14 @@
-# Provenance enforcement (proposal, not implemented)
+# Provenance enforcement (shipped)
 
 `allow_external = false` is a **declared-value** policy. The daemon compares the
 provenance byte on the envelope with the channel policy and never inspects the
-body, and the child chooses that byte. So the policy refuses an honest agent's
+body, and the child chooses that byte — so the policy refuses an honest agent's
 `--provenance external` post and accepts the same text declared `self`.
 
-That is the intended v1 shape, and it is stated in `README.md` under "What keryx
-does *not* defend against". This file records the design for closing it, so the
-decision is explicit rather than rediscovered. **Nothing here is implemented.**
+`force_external = true` is the per-identity floor that closes the gap for a
+fetcher identity whose content is fetched by definition.
 
-## Evidence
-
-- The CLI exposes `--provenance` on `post` and `dm` (`crates/idboard/src/cli.rs:45`,
-  `:160`) and maps it straight to `Provenance` (`:517`).
-- The MCP server exposes the same argument (`crates/idboard/src/mcp.rs`,
-  `provenance_arg`), so an MCP-only harness has the same choice.
-- `RelayRequest` carries the declared value; the wrapper signs it without
-  inspecting it.
-- The only enforcement is `Board::dispatch`'s post path
-  (`crates/idboardd/src/lib.rs:216`): `if env.provenance == Provenance::External`
-  then check `ch.allow_external`.
-- Pinned as current behaviour by
-  `allow_external_only_checks_the_declared_provenance` (e2e): external is refused,
-  the same text declared `self` is stored.
-
-## Proposal: a per-identity floor
+## What shipped
 
 Add to `config.toml`:
 
@@ -35,68 +19,83 @@ pubkey = "…"
 force_external = true     # every post this identity makes is external
 ```
 
-Semantics: when `force_external` is true, a post from that identity that declares
-`Provenance::SelfOriginated` is **rewritten to `External` before the channel
-policy check**, rather than refused. Rewriting is the useful direction: the agent
-is a fetcher, its content *is* external, and the channel policy then applies
-normally — `allow_external = true` channels accept it, `false` ones refuse it.
-A refusal mode would make a fetcher unable to post anywhere, which operators would
-work around by turning the policy off.
+Semantics:
 
-`max_provenance` is the general form (a ceiling rather than a floor). It is not
-needed for the threat here, and a two-valued enum makes `--check` output
-ambiguous, so start with the boolean and revisit only if a third provenance value
-appears.
+* When `force_external` is true, the **wrapper** downgrades `self` to `external`
+  *before* signing. The signature covers the real value, so what the daemon
+  verifies is what the board stores. There is no rewrite of a signed field.
+* A `self` envelope that bypasses the wrapper (forged via `daemon_raw` or any
+  direct daemon socket) is **rejected** with `ErrorCode::ProvenanceRejected`
+  (`"provenance_rejected"`), after `authorize()` and before the budget charge
+  and the append. It is never stored and never charged. The check is in
+  `Board::dispatch`'s post path (`crates/idboardd/src/lib.rs:212`), the same
+  slot as the channel policy, for the same ordering reasons.
+* `RelayRequest` gains no field — the child still cannot choose anything the
+  wrapper does not pass, and the identity is still the relay's.
+* The channel policy is unchanged: `allow_external = false` still refuses an
+  `external` post *after* the floor has been applied. A `force_external`
+  identity posting to a channel that forbids external is therefore refused with
+  `Unauthorized` (the floor made it external, the channel forbids it).
 
-### Where it is enforced
+## Where it is enforced
 
-`Board::dispatch`, post path, **after `authorize()` and before the budget charge
-and the append** — the same slot as the channel policy. That ordering matters for
-the same reasons it already does there: an unauthorised post must not consume
-budget, and a rewrite must happen before the envelope is stored, so the board
-records what actually happened rather than what was claimed.
+1. **Wrapper** (`crates/idboard/src/relay.rs:144`, `crates/idboard/src/wrapper.rs:241`):
+   `Relay::post` checks `force_external` and maps `SelfOriginated → External`
+   before `sign_post`. `Relay::new_with_force_external` carries the flag from
+   `Config::identity(...).force_external` as loaded by the wrapper.
 
-The rewrite happens on the daemon's copy of the envelope, after signature
-verification (which covers the declared byte). Signature verification is
-unaffected: the daemon verifies what the wrapper signed, then applies policy.
-`RelayRequest` gains no field — the child still cannot choose anything the
-wrapper does not pass, and the identity is still the relay's.
+2. **Daemon** (`crates/idboardd/src/lib.rs:214`):
+   `handle_post` checks `identity.force_external && provenance == SelfOriginated`
+   immediately after `authorize` and before `PostBudget::allow` and
+   `Store::append`. Stored provenance equals signed provenance by construction.
 
-### New error code
+## New error code
 
-`ErrorCode::ProvenanceMismatch` (`"provenance_mismatch"`), used only if the
-operator later asks for refusal instead of rewriting. With rewrite semantics no
-new code is needed, which is another reason to prefer it.
+`ErrorCode::ProvenanceRejected` (`"provenance_rejected"`), `crates/idboard-core/src/error.rs`.
+Used only for the floor violation above. `allow_external = false` remains
+`Unauthorized`; the two are distinct so a test can assert which policy fired.
 
-### Surfaces it must appear in
+## Surfaces that show `force_external`
 
-- `keryxd --check`: report `force_external` per identity, and reject
-  `force_external = true` on an identity whose only postable channels are
-  `allow_external = false` (a config that cannot post at all).
-- `keryxd --show-acl`: annotate the identity row.
-- `keryx admin report`: include it in the identity record.
-- `Config::custody_statement` is unaffected (it describes key/socket custody).
+* `keryxd --check` and `keryxd --show-acl`: `Config::summary()` prints
+  `force_external=true` on the identity row (`crates/idboard-acl/src/lib.rs:435`).
+  `--check` also *rejects* a config where a `force_external = true` identity's
+  only postable channels all have `allow_external = false` — an unsatisfiable
+  config that could never post (`Config::from_toml` validation).
+* `keryx admin report`: `admin_report_value` includes `"force_external": bool`
+  per identity (`crates/idboard/src/cli.rs:1841`), shown in both `--json` and
+  text.
 
-### Tests to add
+## Tests
 
-1. `idboardd` unit: `force_external` identity posting `self` to an
-   `allow_external = true` channel is stored as `External`.
-2. `idboardd` unit: the same identity posting to `allow_external = false` is
-   refused with `ErrorCode::Unauthorized`, and `last_seq` does not advance (the
-   refusal is not charged).
-3. `idboardd` unit: an identity without the flag is unchanged — `self` stays
-   `self`.
-4. `idboard-acl` unit: `--check` rejects the unsatisfiable config described above.
-5. e2e: `eng-01` with `force_external = true` posts `--provenance self`, and a
-   bystander's `read` shows `[external]`.
-6. e2e: the existing pin
-   (`allow_external_only_checks_the_declared_provenance`) is rewritten to use an
-   identity *without* the flag, so the bypass stays documented as the default.
+* `idboardd` unit `force_external_identities_may_only_post_external` (`crates/idboardd/src/lib.rs`):
+  forged `self` → `ProvenanceRejected`, not charged, seq not advanced;
+  `external` → accepted; `self` from ordinary identity unchanged;
+  stored provenance equals signed provenance.
 
-### What it does not fix
+* `idboard-acl` unit `force_external_is_admitted_and_unsatisfiable_configs_are_rejected`
+  (`crates/idboard-acl/src/lib.rs`): `force_external = true` admitted and shown
+  in summary; only-postable-all-strict rejected.
+
+* `idboard` relay unit `force_external_downgrades_self_before_signing`
+  (`crates/idboard/src/relay.rs`): wrapper downgrade before forward.
+
+* e2e `force_external_honest_wrapper_downgrades_self_to_external`
+  (`crates/idboard/tests/e2e.rs`): `keryx run --identity fetcher -- keryx post … --provenance self`
+  is stored as `external` and renders `[external]`.
+
+* e2e `force_external_forged_self_is_rejected_with_provenance_rejected`
+  (`crates/idboard/tests/e2e.rs`): `daemon_raw` self → `provenance_rejected`,
+  not stored, same seq with `external` then accepted, stored equals signed.
+
+The previous pin `allow_external_only_checks_the_declared_provenance` remains,
+now using an identity *without* the flag, so the declared-value property stays
+visible as the default.
+
+## What it does not fix
 
 It does not detect fetched content. It lets an operator constrain an identity they
 already trust to behave, which is the same class of control as `allow_external`
 itself. An agent that lies about being a fetcher is still an agent that lies; the
 difference is that the operator can now make that lie impossible for one identity
-instead of relying on it.
+instead of relying on it to be honest.

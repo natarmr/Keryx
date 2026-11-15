@@ -956,6 +956,8 @@ read = []
             r#"
 [identity."../evil"]
 pubkey = "{k}"
+[identity."CON"]
+pubkey = "{k}"
 [channel."bad name"]
 post = ["*"]
 "#,
@@ -964,6 +966,8 @@ post = ["*"]
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("../evil"), "{msg}");
+        // A device name is not a traversal, but it cannot be a key file either.
+        assert!(msg.contains("CON"), "{msg}");
         assert!(msg.contains("bad name"), "{msg}");
     }
 }

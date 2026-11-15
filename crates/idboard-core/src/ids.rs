@@ -47,12 +47,38 @@ fn is_channel_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/')
 }
 
+/// Windows device names, which are still devices when they carry an extension.
+///
+/// `keys/CON.key` opens the console rather than a file, so a key written there
+/// can never be read back. The list is the documented set; `CONIN$`/`CONOUT$`
+/// and the superscript-digit aliases need characters the identity charset
+/// already refuses.
+const WINDOWS_DEVICE_NAMES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// Whether `name` is a Windows device name once the first `.` is stripped.
+///
+/// Windows resolves `CON`, `CON.key` and `con.anything` to the same device, and
+/// does so case-insensitively. `deploy.bot` is an ordinary file: only the part
+/// before the first dot is a device candidate.
+fn is_windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    WINDOWS_DEVICE_NAMES.contains(&stem.to_ascii_lowercase().as_str())
+}
+
 /// Validate an identity name: non-empty, bounded, restricted charset.
 ///
 /// Deliberately narrow. Identity names end up in lockfile paths, socket names,
 /// and TOML table headers, so we refuse separators, spaces, and control
 /// characters rather than sanitising them. A caller that wants "deploy bot"
 /// should name it `deploy-bot`.
+///
+/// Windows device names are refused on every platform, not just on Windows. The
+/// name is a portable config value: accepting it on Unix and rejecting it on
+/// Windows would give one config two meanings, and the Windows failure is silent
+/// (the key file is created, then unreadable).
 pub fn validate_identity(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(CoreError::bad_request("identity name is empty"));
@@ -62,6 +88,14 @@ pub fn validate_identity(name: &str) -> Result<()> {
     // parent of the keys directory.
     if name == "." || name == ".." {
         return Err(CoreError::bad_request(format!("identity name {name:?} is reserved")));
+    }
+    // The key file is `<name>.key`, and on Windows a device name wins over the
+    // directory: the file would be created and then be unreadable.
+    if is_windows_device_name(name) {
+        return Err(CoreError::bad_request(format!(
+            "identity name {name:?} is a reserved Windows device name (CON, PRN, AUX, NUL, \
+             COM1-9, LPT1-9) and cannot be used as a key file name"
+        )));
     }
     if name.len() > MAX_IDENTITY_LEN {
         return Err(CoreError::bad_request(format!(
@@ -163,6 +197,31 @@ mod tests {
         // Guards against homoglyph identities that look alike in a terminal.
         assert!(validate_identity("eng\u{0430}1").is_err());
         assert!(validate_channel("gener\u{0430}l").is_err());
+    }
+
+    #[test]
+    fn rejects_windows_reserved_device_names() {
+        // An identity name becomes `keys/<name>.key`. On Windows the device
+        // names win over the directory: `keys/CON.key` is the console, not a
+        // file, so a key written there can never be read back. Measured:
+        // `keryx keygen CON` prints a pubkey, then every later run fails with
+        // `already exists`, because the entry exists but resolves to the device.
+        for n in [
+            "CON", "con", "Con", "PRN", "AUX", "NUL", "nul", "COM1", "COM9", "LPT1", "LPT9", "lpt9",
+            "CON.key", "nul.txt",
+        ] {
+            let err = validate_identity(n).unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadRequest, "identity {n:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn accepts_names_that_merely_resemble_a_device() {
+        // The check is on the whole name before the first dot, not a substring:
+        // these are ordinary files and must stay usable.
+        for n in ["console", "con-artist", "null", "com0", "com10", "lpt", "lpt10", "auxiliary", "deploy.bot", "prn1"] {
+            assert!(validate_identity(n).is_ok(), "identity {n:?} was wrongly refused");
+        }
     }
 
     #[test]

@@ -570,6 +570,13 @@ These are chosen, not overlooked.
   Two wrappers would share one key and interleave sequence numbers, and the board
   could no longer say which process posted what — destroying post-incident
   attribution, which is the main thing a signed board is for.
+- **Identity names are a narrow charset.** `[A-Za-z0-9._-]`, at most 64 bytes, and
+  not `.`, `..`, or a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`9`,
+  `LPT1`-`9`, with or without an extension). The name is a file name
+  (`keys/<id>.key`, `run/<id>.lock`), so separators and traversal are refused
+  rather than sanitised. Device names are refused on every platform because
+  `keys/CON.key` is the console on Windows: the file is created and then can
+  never be read back, so the operator is handed a key that does not exist.
 - **Poll, not push, for `subscribe`.** A poll loop establishes presence on its
   own ("alive and asking"). Push would need the daemon to track subscriber
   connections and fan out. If dogfooding shows staleness actually matters, the

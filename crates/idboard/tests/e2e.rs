@@ -521,6 +521,33 @@ fn a_rotated_keystore_is_caught_before_the_child_starts() {
 }
 
 #[test]
+fn keygen_refuses_windows_device_names_and_writes_no_key() {
+    let b = TestBoard::start();
+    let keys = b.home.path().join("keys");
+
+    for name in ["CON", "NUL", "COM1", "lpt9", "con.key"] {
+        let out = b.keryx(&["keygen", name]);
+        assert!(!out.status.success(), "keygen {name} must be refused: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // The specific code, not merely "it failed".
+        assert!(stderr.contains("bad_request"), "keygen {name} stderr: {stderr}");
+
+        // And nothing was written. On Windows an entry named CON.key can be
+        // created but never read back, so "created then unreadable" is the
+        // failure this check exists to prevent.
+        let written = std::fs::read_dir(&keys)
+            .expect("keys dir")
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().eq_ignore_ascii_case(&format!("{name}.key")));
+        assert!(!written, "keygen {name} must not create a key file");
+    }
+
+    // An ordinary name still works, so the check is not a blanket refusal.
+    let ok = b.keryx(&["keygen", "deploy.bot", "--pubkey-only"]);
+    assert!(ok.status.success(), "{}", String::from_utf8_lossy(&ok.stderr));
+}
+
+#[test]
 fn an_identity_absent_from_the_config_is_refused_with_the_fix() {
     let b = TestBoard::start();
     let out = b.as_identity("never-registered", &["post", "general", "hi"]);

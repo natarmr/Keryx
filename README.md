@@ -329,6 +329,15 @@ prints the ephemeral URL, and never accepts writes; the board card shows channel
 task, claimed-by, oldest-unclaimed, and last-message age, and `--once` serves
 exactly one request, which is how tests pin the behaviour.
 
+The console's own controls, since it is the one surface a *browser* reaches: the
+address is checked to be loopback after it is resolved, not merely as a string;
+the path carries a 32-byte token compared in constant time; a `Host` header that
+is not this console is answered `404` before any token comparison, which is what
+stops a DNS-rebinding page from reading the board; and every response carries
+`no-store`, `nosniff`, `no-referrer` and a CSP with `default-src 'none'` and
+`frame-ancestors 'none'`. Board text is escaped into the DOM, never assigned raw.
+It is read-only because no route mutates anything, not because a check forbids it.
+
 `keryx post --json` failures also carry machine-readable hints for the common
 cases (`unauthorized`, `unknown_channel`, `rate_limited`), including
 `visible_channels` and `closest_channels` for channel typos.

@@ -2288,18 +2288,15 @@ fn the_legacy_command_aliases_are_still_installed() {
 fn web_once_serves_the_landing_page_over_loopback() {
     let b = TestBoard::start();
 
-    // Pre-select an ephemeral port; tiny race, acceptable for the one request we perform.
-    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind scratch port")
-        .local_addr()
-        .expect("local addr")
-        .port();
-
+    // Port 0 lets the console pick, and the printed URL carries the real port.
+    // The earlier version pre-bound a scratch socket and passed its port on: the
+    // release-then-rebind window let another test claim the port between the
+    // two, which showed up as a reset connection under a parallel suite run.
     let mut child = Command::new(sibling_bin("keryx"))
         .arg("web")
         .arg("--once")
         .arg("--bind")
-        .arg(format!("127.0.0.1:{port}"))
+        .arg("127.0.0.1:0")
         .env("IDBOARD_HOME", b.home.path())
         .env("IDBOARD_CONFIG", &b.config)
         .env("IDBOARD_DAEMON", &b.socket)
@@ -2317,7 +2314,7 @@ fn web_once_serves_the_landing_page_over_loopback() {
         let _ = tx.send(line);
     });
 
-    let line = match rx.recv_timeout(Duration::from_secs(2)) {
+    let line = match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(line) => line,
         Err(_) => {
             let _ = child.kill();
@@ -2332,12 +2329,17 @@ fn web_once_serves_the_landing_page_over_loopback() {
         .trim_end_matches('/')
         .to_string();
 
-    let path = url.strip_prefix("http://127.0.0.1:").expect("loopback URL");
-    let path = path.splitn(2, '/').nth(1).map(|rest| format!("/{rest}")).unwrap_or_else(|| "/".to_string());
+    let rest = url.strip_prefix("http://").expect("scheme");
+    let authority = rest.split('/').next().expect("authority").to_string();
+    let path = rest[authority.len()..].to_string();
+    assert!(path.len() > 1, "the URL must carry a token path: {url}");
+    let port: u16 = authority.rsplit_once(':').expect("host:port").1.parse().expect("port");
 
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to web console");
-    use std::io::Write;
-    write!(stream, "GET {path} HTTP/1.0\r\nConnection: close\r\n\r\n").expect("write request");
+    // The Host header is what the DNS-rebinding guard reads, so send the one a
+    // browser would send for this URL.
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n")
+        .expect("write request");
     let mut response = String::new();
     std::io::Read::read_to_string(&mut stream, &mut response).expect("read response");
 
@@ -2345,8 +2347,81 @@ fn web_once_serves_the_landing_page_over_loopback() {
     assert!(response.contains("Keryx console"), "{response}");
     assert!(!response.contains("POST"), "{response}");
 
+    // The hardening headers are part of the surface, not decoration: a console
+    // that stops sending them is a console that quietly became framable.
+    assert!(response.contains("Cache-Control: no-store"), "{response}");
+    assert!(response.contains("Referrer-Policy: no-referrer"), "{response}");
+    assert!(response.contains("X-Content-Type-Options: nosniff"), "{response}");
+    let csp = response
+        .lines()
+        .find(|line| line.starts_with("Content-Security-Policy:"))
+        .unwrap_or_else(|| panic!("no CSP header: {response}"));
+    for directive in ["default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'"] {
+        assert!(csp.contains(directive), "CSP is missing {directive}: {csp}");
+    }
+
     let status = child.wait().expect("keryx web --once exits after one request");
     assert!(status.success(), "{status:?}");
+}
+
+#[test]
+fn web_refuses_a_host_header_that_is_not_this_console() {
+    let b = TestBoard::start();
+
+    // Two servers, because `--once` exits after the request it refuses.
+    for host in ["evil.example:80", "127.0.0.1.evil.example"] {
+        let mut child = Command::new(sibling_bin("keryx"))
+            .arg("web")
+            .arg("--once")
+            .arg("--bind")
+            .arg("127.0.0.1:0")
+            .env("IDBOARD_HOME", b.home.path())
+            .env("IDBOARD_CONFIG", &b.config)
+            .env("IDBOARD_DAEMON", &b.socket)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn keryx web --once");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let child_stdout = child.stdout.take().expect("stdout piped");
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let mut reader = std::io::BufReader::new(child_stdout);
+            let _ = std::io::BufRead::read_line(&mut reader, &mut line);
+            let _ = tx.send(line);
+        });
+        let line = match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(line) => line,
+            Err(_) => {
+                let _ = child.kill();
+                panic!("keryx web --once did not print its URL in time");
+            }
+        };
+        let url = line
+            .split_whitespace()
+            .find(|part| part.starts_with("http://127.0.0.1:"))
+            .expect("URL in printed line")
+            .trim_end_matches('/')
+            .to_string();
+        let rest = url.strip_prefix("http://").expect("scheme");
+        let authority = rest.split('/').next().expect("authority").to_string();
+        let path = rest[authority.len()..].to_string();
+        let port: u16 = authority.rsplit_once(':').expect("host:port").1.parse().expect("port");
+
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+            .expect("write request");
+        let mut response = String::new();
+        std::io::Read::read_to_string(&mut stream, &mut response).expect("read response");
+
+        // 404 with no console content: a rebinding request must not learn
+        // whether the token was right, or even that this is a keryx console.
+        assert!(response.contains("HTTP/1.0 404 Not Found"), "Host {host}: {response}");
+        assert!(!response.contains("Keryx console"), "Host {host}: {response}");
+        let status = child.wait().expect("keryx web --once exits");
+        assert!(status.success(), "{status:?}");
+    }
 }
 
 // --- Message plane: search / thread / around (CLI conveniences over read) ---

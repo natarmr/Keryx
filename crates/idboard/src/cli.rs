@@ -2783,7 +2783,7 @@ fn web_board(limit: u32) -> serde_json::Value {
     board
 }
 
-fn response_for_request(request: &str, token: &str, limit: u32) -> (u16, &'static str, Vec<u8>) {
+fn response_for_request(request: &str, token: &str, limit: u32, bound: &str) -> (u16, &'static str, Vec<u8>) {
     let mut parts = request.split_whitespace();
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("");
@@ -2794,6 +2794,13 @@ fn response_for_request(request: &str, token: &str, limit: u32) -> (u16, &'stati
     if method != "GET" && method != "HEAD" {
         return (405, "text/plain; charset=utf-8", b"method not allowed\n".to_vec());
     }
+    // Before the token: a request that believes it is talking to another origin
+    // never gets a chance to compare tokens. This is the DNS-rebinding guard —
+    // a page on `evil.example` that resolves to 127.0.0.1 still sends
+    // `Host: evil.example`, and is refused here.
+    if !host_is_acceptable(request, bound) {
+        return (404, "text/plain; charset=utf-8", b"not found\n".to_vec());
+    }
 
     let path = path.split(['?', '#']).next().unwrap_or("");
     let Some(rest) = path.strip_prefix('/') else {
@@ -2803,7 +2810,10 @@ fn response_for_request(request: &str, token: &str, limit: u32) -> (u16, &'stati
     let Some(first) = pieces.next() else {
         return (404, "text/plain; charset=utf-8", b"not found\n".to_vec());
     };
-    if first != token {
+    // Constant time, through the same helper the relay uses for its bearer
+    // token. The length check inside it leaks only the length, and the console
+    // token is a fixed 64 hex characters.
+    if !idboard::relay::constant_time_eq(first.as_bytes(), token.as_bytes()) {
         return (404, "text/plain; charset=utf-8", b"not found\n".to_vec());
     }
     let route = pieces.next().unwrap_or("").trim_end_matches('/');
@@ -2815,6 +2825,53 @@ fn response_for_request(request: &str, token: &str, limit: u32) -> (u16, &'stati
         }
         _ => (404, "text/plain; charset=utf-8", b"not found\n".to_vec()),
     }
+}
+
+/// Whether the request's `Host` names this console.
+///
+/// `bound` is the address the listener actually bound (`127.0.0.1:8080`). The
+/// host part must be a loopback literal or `localhost`, and a port, when given,
+/// must be the one we are serving. `HTTP/1.0` has no `Host` header by
+/// definition, so a missing one is accepted only there; a browser (HTTP/1.1+)
+/// always sends it, which is the case this guards.
+fn host_is_acceptable(request: &str, bound: &str) -> bool {
+    let version = request.split_whitespace().nth(2).unwrap_or("");
+    let required = !version.eq_ignore_ascii_case("HTTP/1.0");
+    let Some(host) = header_value(request, "host") else {
+        return !required;
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        return false;
+    }
+    let (host_part, port) = if let Some(rest) = host.strip_prefix('[') {
+        // IPv6 literal: the port separator is after the closing bracket.
+        match rest.split_once(']') {
+            Some((literal, after)) => (literal, after.strip_prefix(':')),
+            None => return false,
+        }
+    } else {
+        match host.rsplit_once(':') {
+            Some((literal, port)) => (literal, Some(port)),
+            None => (host, None),
+        }
+    };
+    if !matches!(host_part, "127.0.0.1" | "::1" | "localhost") {
+        return false;
+    }
+    match port {
+        None => true,
+        Some(port) => bound.rsplit_once(':').map(|(_, bound_port)| bound_port) == Some(port),
+    }
+}
+
+/// Case-insensitive header lookup. The first line is the request line, so it is
+/// skipped: a path containing `host:` must not be read as a header.
+fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request.lines().skip(1).find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value)
+    })
 }
 
 fn web_bind_is_loopback(bind: &str) -> bool {
@@ -2839,7 +2896,18 @@ fn cmd_web(json: bool, bind: &str, once: bool) -> Result<i32> {
     let local = listener.local_addr().map_err(|e| {
         idboard_core::error::CoreError::internal(format!("failed to read web console address: {e}"))
     })?;
-    let token = idboard::relay::random_suffix()?;
+    // The string check above is not the control: `--bind localhost:8080` resolves
+    // through the system resolver, so the *resolved* address is what must be
+    // loopback. Refuse rather than serve a console the operator did not intend.
+    if !local.ip().is_loopback() {
+        return Err(idboard_core::error::CoreError::bad_request(format!(
+            "web console resolved {bind} to {}, which is not a loopback address; refusing to serve",
+            local.ip()
+        )));
+    }
+    // The console token is the only credential on this surface, so it gets the
+    // full 32 bytes the relay token uses rather than the 8-byte socket suffix.
+    let token = idboard::relay::generate_token()?;
     let url = format!("http://{local}/{token}/");
     if json {
         println!("{}", serde_json::json!({ "ok": true, "url": url }));
@@ -2873,7 +2941,7 @@ fn cmd_web(json: bool, bind: &str, once: bool) -> Result<i32> {
             continue;
         };
         let method = request_text.split_whitespace().next().unwrap_or("");
-        let (status, content_type, body) = response_for_request(request_text, &token, 5);
+        let (status, content_type, body) = response_for_request(request_text, &token, 5, &local.to_string());
         let status_line = match status {
             200 => "OK",
             400 => "Bad Request",
@@ -2883,7 +2951,7 @@ fn cmd_web(json: bool, bind: &str, once: bool) -> Result<i32> {
         };
         let head_body = if method == "HEAD" { Vec::new() } else { body };
         let response = format!(
-            "HTTP/1.0 {status} {status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'\r\n\r\n",
+            "HTTP/1.0 {status} {status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n\r\n",
             head_body.len()
         );
         let _ = socket.write_all(response.as_bytes());
@@ -3402,22 +3470,118 @@ mod tests {
 
     #[test]
     fn web_response_requires_the_ephemeral_token_and_only_supports_read_methods() {
-        let html = response_for_request("GET /test-token/ HTTP/1.1\r\n\r\n", "test-token", 5);
+        let html = response_for_request("GET /test-token/ HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n\r\n", "test-token", 5, "127.0.0.1:8080");
         assert_eq!(html.0, 200);
         assert_eq!(html.1, "text/html; charset=utf-8");
         let body = String::from_utf8(html.2.clone()).unwrap();
         assert!(body.contains("Keryx console"), "{body}");
 
-        let miss = response_for_request("GET /wrong/ HTTP/1.1\r\n\r\n", "test-token", 5);
+        let miss = response_for_request("GET /wrong/ HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n\r\n", "test-token", 5, "127.0.0.1:8080");
         assert_eq!(miss.0, 404);
 
-        let post = response_for_request("POST /test-token/ HTTP/1.1\r\n\r\n", "test-token", 5);
+        let post = response_for_request("POST /test-token/ HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n\r\n", "test-token", 5, "127.0.0.1:8080");
         assert_eq!(post.0, 405);
 
-        let head = response_for_request("HEAD /test-token/ HTTP/1.1\r\n\r\n", "test-token", 5);
+        let head = response_for_request("HEAD /test-token/ HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n\r\n", "test-token", 5, "127.0.0.1:8080");
         assert_eq!(head.0, 200);
         assert_eq!(web_bind_is_loopback("127.0.0.1:0"), true);
         assert_eq!(web_bind_is_loopback("0.0.0.0:0"), false);
+    }
+
+    /// DNS rebinding: a page served from `evil.example` can resolve that name to
+    /// 127.0.0.1, but the browser still sends `Host: evil.example`. The console
+    /// refuses before it compares a token, so a rebinding request learns nothing.
+    #[test]
+    fn web_console_refuses_a_host_header_that_is_not_this_console() {
+        let bound = "127.0.0.1:8080";
+        let request = |host: &str, version: &str| {
+            response_for_request(
+                &format!("GET /test-token/ {version}\r\nHost: {host}\r\n\r\n"),
+                "test-token",
+                5,
+                bound,
+            )
+            .0
+        };
+
+        assert_eq!(request("127.0.0.1:8080", "HTTP/1.1"), 200);
+        assert_eq!(request("localhost:8080", "HTTP/1.1"), 200);
+        assert_eq!(request("[::1]:8080", "HTTP/1.1"), 200);
+
+        // The rebinding shape: a real host name, and a name that merely looks
+        // like a loopback address.
+        assert_eq!(request("evil.example:8080", "HTTP/1.1"), 404);
+        assert_eq!(request("127.0.0.1.evil.example:8080", "HTTP/1.1"), 404);
+        // A loopback host on the wrong port is not this console either.
+        assert_eq!(request("127.0.0.1:9999", "HTTP/1.1"), 404);
+        assert_eq!(request("", "HTTP/1.1"), 404);
+
+        // HTTP/1.1 requires a Host; HTTP/1.0 has none by definition, so a
+        // non-browser client on 1.0 is still served.
+        let no_host = response_for_request("GET /test-token/ HTTP/1.1\r\n\r\n", "test-token", 5, bound);
+        assert_eq!(no_host.0, 404, "a 1.1 request with no Host must be refused");
+        let http10 = response_for_request("GET /test-token/ HTTP/1.0\r\n\r\n", "test-token", 5, bound);
+        assert_eq!(http10.0, 200, "HTTP/1.0 cannot carry a Host header");
+    }
+
+    /// A header lookup must not be fooled by a path that contains `host:`.
+    #[test]
+    fn web_header_lookup_ignores_the_request_line() {
+        let ok = response_for_request(
+            "GET /test-token/?host:evil.example HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n\r\n",
+            "test-token",
+            5,
+            "127.0.0.1:8080",
+        );
+        assert_eq!(ok.0, 200, "the real Host header decides, not the path");
+
+        let spoof = response_for_request(
+            "GET /test-token/ HTTP/1.1\r\nX-Host: 127.0.0.1:8080\r\nHost: evil.example\r\n\r\n",
+            "test-token",
+            5,
+            "127.0.0.1:8080",
+        );
+        assert_eq!(spoof.0, 404, "a different header name must not satisfy the check");
+    }
+
+    /// The console token is the only credential on that surface, so it is the
+    /// relay token's 32 bytes (64 hex characters), not the 8-byte socket suffix.
+    #[test]
+    fn web_console_token_is_a_full_strength_token() {
+        let token = idboard::relay::generate_token().unwrap();
+        assert_eq!(token.len(), idboard::relay::TOKEN_BYTES * 2, "{token}");
+        assert_ne!(token, idboard::relay::generate_token().unwrap());
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()), "{token}");
+    }
+
+    /// Every interpolation of untrusted board data must go through `esc()`.
+    ///
+    /// The page is static and renders into `innerHTML`, so escaping is the only
+    /// thing standing between a hostile message body and script execution. A
+    /// Rust test cannot run the page, but it can refuse the unwrapped forms.
+    #[test]
+    fn web_page_escapes_every_untrusted_field_it_renders() {
+        for field in [
+            "${m.body}",
+            "${m.sender}",
+            "${m.cursor}",
+            "${c.channel}",
+            "${c.messages}",
+            "${p.identity}",
+            "${p.role}",
+            "${c.name}",
+            "${c.detail}",
+            "${p.check}",
+            "${p.detail}",
+        ] {
+            assert!(
+                !WEB_HTML.contains(field),
+                "{field} is rendered without esc(); untrusted text must be escaped"
+            );
+        }
+        // And the helper itself is present, with the five characters that matter.
+        assert!(WEB_HTML.contains("const esc = (v) => String(v).replace(/[&<>\"']/g"));
+        assert!(WEB_HTML.contains("${esc(m.body)}"), "the message body is escaped");
     }
 
     #[test]
@@ -3526,7 +3690,7 @@ mod tests {
         for needle in ["tasks-by-identity", "tasks-leases", "tasks-summary", "board-age", "last message:"] {
             assert!(WEB_HTML.contains(needle), "dashboard is missing {needle}");
         }
-        let html = response_for_request("GET /t/ HTTP/1.1\r\n\r\n", "t", 5);
+        let html = response_for_request("GET /t/ HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n\r\n", "t", 5, "127.0.0.1:8080");
         let body = String::from_utf8(html.2).unwrap();
         assert!(body.contains("board-age"), "{body}");
     }

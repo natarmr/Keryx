@@ -41,7 +41,11 @@ pub const TOKEN_BYTES: usize = 32;
 ///
 /// The length check still short-circuits, which leaks only the length, and the
 /// token is a fixed 64 hex characters, so that is not a concern.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+///
+/// `pub` rather than `pub(crate)` because `cli.rs` is compiled into both the
+/// library and the `keryx` binary, and the binary reaches the library through
+/// `idboard::relay`. Two implementations of this would be one too many.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

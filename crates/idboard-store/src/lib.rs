@@ -526,6 +526,7 @@ mod tests {
             pubkey_hex: s.public_hex(),
             fingerprint: s.fingerprint().to_string(),
             description: None,
+            force_external: false,
         };
         assert!(store.register_identities(&[&id]).unwrap().is_empty());
     }
@@ -764,6 +765,7 @@ mod tests {
                 pubkey_hex: s.public_hex(),
                 fingerprint: s.fingerprint().into(),
                 description: None,
+                force_external: false,
             };
             store.register_identities(&[&id]).unwrap();
             store.append("eng-01", &post(&s, "general", "persisted", 1), 1).unwrap();
@@ -797,6 +799,7 @@ mod tests {
             pubkey_hex: old.public_hex(),
             fingerprint: old.fingerprint().into(),
             description: None,
+            force_external: false,
         };
         store.register_identities(&[&id_old]).unwrap();
         store.append("eng-01", &post(&old, "general", "before", 1), 1).unwrap();
@@ -808,6 +811,7 @@ mod tests {
             pubkey_hex: new.public_hex(),
             fingerprint: new.fingerprint().into(),
             description: None,
+            force_external: false,
         };
         let rotated = store.register_identities(&[&id_new]).unwrap();
         assert_eq!(rotated, vec!["eng-01".to_string()], "a changed key must be reported");
@@ -833,6 +837,7 @@ mod tests {
             pubkey_hex: s.public_hex(),
             fingerprint: s.fingerprint().into(),
             description: None,
+            force_external: false,
         };
         assert!(store.register_identities(&[&id]).unwrap().is_empty());
     }

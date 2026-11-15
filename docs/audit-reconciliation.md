@@ -60,13 +60,23 @@ construction.
 
 ## What the audit did not cover, and now exists
 
-The audit predates `keryx mcp`, `keryx inbox`, `keryx peers`, and
-`[limits]`. The trust-boundary property they must all preserve is the same one:
+The audit predates `keryx mcp`, `keryx inbox`, `keryx peers`,
+`[limits]`, and the task cooperation plane (`task link`/`ready`,
+`heartbeat`, `task complete --result/--note`, `watch --watch`). The
+trust-boundary property they must all preserve is the same one:
 
 - `keryx mcp` is a front-end over `RelayClient`, never a second route to the
-  daemon, and takes no identity argument.
+  daemon, and takes no identity argument. That holds for the task tools too
+  (`tasks`, `task_claim`, `task_done`, `next_task`, `replay`): they compose the
+  same relay `read`/`inbox`/`post` calls the CLI makes, and the sender comes
+  from the relay handshake.
 - `inbox` and `peers` are read-class queries signed by the wrapper, so they cost
   no sequence numbers and cannot be constructed by a child.
+- Task state (`create`/`claim`/`link`/`done`, leases, `depends_on`,
+  `result`/`note`) is an ordinary signed-message convention reconstructed
+  locally by one shared module (`idboard::tasks`); it adds no envelope type,
+  no ACL input, and no authorisation path. `next`/`ready`/`heartbeat` only
+  filter that reconstructed state.
 - The post budget is charged after authorisation and before the append, so a
   refused request is neither stored nor charged, and reads are never charged.
 

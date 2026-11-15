@@ -1122,7 +1122,7 @@ fn mcp_serves_the_wrappers_identity_and_the_board_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["whoami", "post", "read", "inbox", "peers"]);
+    assert_eq!(names, ["whoami", "post", "read", "inbox", "peers", "tasks", "task_claim", "task_done", "next_task", "replay"]);
 
     let who = mcp.call(3, "whoami", serde_json::json!({}));
     assert_eq!(who["result"]["isError"], false);
@@ -1157,7 +1157,45 @@ fn mcp_serves_the_wrappers_identity_and_the_board_tools() {
         "the caller has acted and must be seen: {eng:?}"
     );
 
+    // Task tools run the whole agent loop over MCP: list, claim, next skips the
+    // claimed one, done with a result, and the daemon sees signed messages.
+    // The MCP child holds eng-01's wrapper lock, so drive the CLI side as
+    // eng-02; tasks are cross-identity by design.
+    let created = b.as_identity("eng-02", &["task", "create", "general", "mcp coordinated task"]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let task_id = String::from_utf8_lossy(&created.stdout)
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id in confirmation")
+        .to_string();
+
+    let listed = mcp.call(7, "tasks", serde_json::json!({}));
+    assert_eq!(listed["result"]["isError"], false);
+    assert!(tool_text(&listed).contains(&task_id), "MCP tasks must see the CLI-created task");
+
+    let next = mcp.call(8, "next_task", serde_json::json!({}));
+    let next_text = tool_text(&next);
+    assert!(next_text.contains(&task_id), "the unclaimed task must be next: {next_text}");
+
+    let claimed = mcp.call(9, "task_claim", serde_json::json!({ "channel": "general", "task_id": task_id }));
+    assert_eq!(claimed["result"]["isError"], false, "MCP claim failed: {claimed}");
+    assert!(tool_text(&claimed).contains("\"claimed\":true"));
+
+    let done = mcp.call(
+        10,
+        "task_done",
+        serde_json::json!({ "channel": "general", "task_id": task_id, "result": "ok", "note": "done over mcp" }),
+    );
+    assert_eq!(done["result"]["isError"], false, "MCP done failed: {done}");
+
+    // The daemon saw signed messages from the wrapper's identity throughout.
     mcp.close();
+    let out = b.read("eng-02", "general", "0");
+    let stored = messages_of(&out);
+    let bodies: Vec<&str> =
+        stored.iter().map(|m| m["body"].as_str().unwrap()).collect();
+    assert!(bodies.iter().any(|body| body.contains("\"kind\":\"claim\"")), "{bodies:?}");
+    assert!(bodies.iter().any(|body| body.contains("\"kind\":\"done\"") && body.contains("\"result\":\"ok\"")), "{bodies:?}");
 }
 
 #[test]
@@ -1723,6 +1761,113 @@ fn task_list_stale_surfaces_old_unclaimed_work() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("task list --json must be JSON");
     assert!(v["tasks"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn task_link_blocks_dependents_until_prerequisites_are_done() {
+    let b = TestBoard::start();
+
+    let first = b.as_identity("eng-01", &["task", "create", "general", "foundation"]);
+    let t1 = String::from_utf8_lossy(&first.stdout)
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id")
+        .to_string();
+    let second = b.as_identity("eng-01", &["task", "create", "general", "follow-up"]);
+    let t2 = String::from_utf8_lossy(&second.stdout)
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id")
+        .to_string();
+
+    let linked = b.as_identity("eng-01", &["task", "link", "general", &t2, &t1]);
+    assert!(linked.status.success(), "{}", String::from_utf8_lossy(&linked.stderr));
+
+    // `next` skips the blocked task even though it is unclaimed.
+    let next = b.as_identity("eng-01", &["task", "next", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&next.stdout).expect("next --json must be JSON");
+    assert_eq!(v["next"]["id"], t1, "the unblocked task comes first: {v}");
+
+    // `ready` lists only the unblocked one.
+    let ready = b.as_identity("eng-01", &["task", "ready", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&ready.stdout).expect("ready --json must be JSON");
+    let ids: Vec<&str> = v["tasks"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec![t1.as_str()], "blocked tasks are not ready: {ids:?}");
+
+    // A self-link is refused before anything is posted.
+    let bad = b.as_identity("eng-01", &["task", "link", "general", &t1, &t1]);
+    assert!(!bad.status.success(), "a task must not depend on itself");
+}
+
+#[test]
+fn heartbeat_recommends_claim_continue_or_idle() {
+    let b = TestBoard::start();
+
+    // Empty board: idle.
+    let out = b.as_identity("eng-01", &["heartbeat", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("heartbeat --json must be JSON");
+    assert_eq!(v["recommendation"]["action"], "idle");
+    assert_eq!(v["identity"], "eng-01");
+
+    // One open task: claim it.
+    let created = b.as_identity("eng-01", &["task", "create", "general", "heartbeat work"]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let out = b.as_identity("eng-01", &["heartbeat", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["recommendation"]["action"], "claim");
+    assert!(v["recommendation"]["command"].as_str().unwrap().contains("task claim"), "{v}");
+
+    // After claiming, the recommendation is to continue it.
+    let task_id = v["recommendation"]["id"].as_str().unwrap().to_string();
+    let claimed = b.as_identity("eng-01", &["task", "claim", "general", &task_id]);
+    assert!(claimed.status.success(), "{}", String::from_utf8_lossy(&claimed.stderr));
+    let out = b.as_identity("eng-01", &["heartbeat", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["recommendation"]["action"], "continue");
+    assert_eq!(v["recommendation"]["id"], task_id);
+
+    // Text output ends with a greppable action line.
+    let out = b.as_identity("eng-01", &["heartbeat"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("action: continue"), "{stdout}");
+}
+
+#[test]
+fn task_complete_records_result_and_note_on_the_done_event() {
+    let b = TestBoard::start();
+
+    let created = b.as_identity("eng-01", &["task", "create", "general", "outcome work"]);
+    let task_id = String::from_utf8_lossy(&created.stdout)
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id")
+        .to_string();
+
+    let done = b.as_identity(
+        "eng-01",
+        &["task", "complete", "general", &task_id, "--body", "hit a wall", "--result", "blocked", "--note", "waiting on deploy"],
+    );
+    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+
+    let out = b.read("eng-02", "general", "0");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("read --json must be JSON");
+    let done_body = v["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["body"].as_str().unwrap_or(""))
+        .find(|body| body.contains("\"kind\":\"done\""))
+        .expect("a done event must be on the board");
+    let done_event: serde_json::Value = serde_json::from_str(done_body.strip_prefix("task:").unwrap())
+        .expect("the done event must be JSON");
+    assert_eq!(done_event["result"], "blocked");
+    assert_eq!(done_event["note"], "waiting on deploy");
+
+    // An invalid result is refused before anything is posted.
+    let bad = b.as_identity("eng-01", &["task", "complete", "general", &task_id, "--body", "x", "--result", "maybe"]);
+    assert!(!bad.status.success(), "an unknown result must be refused");
 }
 
 #[test]

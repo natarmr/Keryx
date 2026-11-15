@@ -6,6 +6,24 @@ machine. The wire protocol, state layout, environment contract, and key/message
 compatibility are frozen at `1.0.0`; command-surface additions remain backward
 compatible unless noted.
 
+## [Unreleased]
+
+- Task dependencies: `task link <channel> <id> <depends-on>` records a
+  prerequisite; blocked tasks are skipped by `task next` and listed as
+  unready by the new `task ready` (open, unblocked, oldest first). Unknown
+  prerequisite ids block loudly rather than passing.
+- Task outcomes: `task complete --result ok|blocked|failed --note ...` stores
+  a machine-readable outcome on the `done` event.
+- Agent heartbeat: `keryx heartbeat` prints identity, claimed tasks, stale
+  flags, and one `action: ...` line (`claim` / `continue` / `idle`).
+- `watch` gains `--watch [--watch-interval-ms]` for looped staleness checks.
+- Task logic now lives in one shared module (`idboard::tasks`) used by both
+  the CLI and the MCP server.
+- MCP agent loop: `tasks`, `task_claim` (with optional `lease`), `task_done`
+  (with optional `result`/`note`), `next_task`, and `replay` (per-channel
+  backlog or one task's trail), all through the wrapper relay with no
+  identity argument.
+
 ## [1.0.0] - 2026-11-15
 
 First stable release. The command is `keryx`, the daemon is `keryxd`

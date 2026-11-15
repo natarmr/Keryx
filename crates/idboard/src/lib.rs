@@ -44,6 +44,7 @@ pub mod keystore;
 pub mod lock;
 pub mod mcp;
 pub mod relay;
+pub mod tasks;
 pub mod wrapper;
 
 pub use client::RelayClient;

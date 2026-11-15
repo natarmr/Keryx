@@ -309,11 +309,13 @@ enforced by review.
   `CREATE TABLE IF NOT EXISTS` statements applied on every `open`. A change that an existing
   `~/.idboard/idboard.db` would reject needs a hand-written migration.
 
-## Known inaccuracy
+## Minimum Rust version
 
-`rust-version = "1.85"` in the workspace manifest is wrong — `idboard/src/lock.rs` uses
-`File::try_lock`, stable since 1.89. Trust the code over the manifest; fixing the manifest
-is a separate, deliberate change.
+`rust-version = "1.89"` in the workspace manifest is the real floor, driven by
+`idboard/src/lock.rs` calling `File::try_lock` (stable since 1.89). Edition 2024
+needs 1.85 and the let-chains in `idboard::tasks` need 1.88, so 1.89 is the
+highest of the three, not a guess. Bump it only with a named API that requires
+it.
 
 ## Environment contract
 

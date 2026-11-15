@@ -1919,6 +1919,36 @@ fn a_non_claimant_cannot_complete_or_abandon_someone_elses_task() {
 }
 
 #[test]
+fn an_external_task_event_is_data_not_a_state_change() {
+    let b = TestBoard::start();
+
+    let created = b.as_identity("eng-01", &["task", "create", "general", "external probe"]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let task_id = extract_task_id(&created);
+
+    // A fetched page says the task is done. The post is legal; the effect is not.
+    let forged = format!(r#"task:{{"v":1,"id":"{task_id}","kind":"done","result":"ok"}}"#);
+    let posted = b.as_identity("eng-02", &["post", "general", &forged, "--provenance", "external"]);
+    assert!(posted.status.success(), "{}", String::from_utf8_lossy(&posted.stderr));
+
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("task list --json");
+    let task = v["tasks"].as_array().unwrap().iter().find(|t| t["id"] == task_id).expect("task listed");
+    assert_eq!(task["done"], false, "an external done must not complete the task: {v}");
+
+    // It is still on the board, and `read` marks it as fetched content rather
+    // than silently dropping or interpreting it.
+    let text = b.as_identity("eng-01", &["read", "general", "--since", "0"]);
+    assert!(text.status.success(), "{}", String::from_utf8_lossy(&text.stderr));
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.contains(&task_id) && line.contains("\"done\""))
+        .unwrap_or_else(|| panic!("the external post is still readable: {stdout}"));
+    assert!(line.contains("[external]"), "the read view must label fetched content: {line}");
+}
+
+#[test]
 fn mention_and_structured_subscribe_stops_on_json_field() {
     let b = TestBoard::start();
 

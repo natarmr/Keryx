@@ -904,7 +904,7 @@ fn cmd_subscribe(
             }
             if let Some(task_id) = exit_on_task {
                 if !task_id.is_empty()
-                    && let Some(ev) = parse_task_event(&m.envelope.body)
+                    && let Some(ev) = trusted_task_event(&m)
                     && ev.kind == "done"
                     && ev.id == task_id
                 {
@@ -1194,8 +1194,8 @@ fn parse_watch_duration_ms(input: &str) -> Result<u64> {
 }
 
 use idboard::tasks::{
-    is_claim_stalled, is_unclaimed_stale, load_channel_tasks, load_tasks, parse_duration_ms, parse_task_event,
-    ready_tasks, select_stale_tasks, stale_alert_json, task_is_blocked, task_json, truncate_to_last,
+    is_claim_stalled, is_unclaimed_stale, load_channel_tasks, load_tasks, parse_duration_ms, ready_tasks,
+    select_stale_tasks, stale_alert_json, task_is_blocked, task_json, truncate_to_last, trusted_task_event,
     visible_readable_channels, TaskRecord,
 };
 
@@ -2376,7 +2376,7 @@ fn cmd_replay(
         let mut messages: Vec<_> = res.messages.into_iter().collect();
         if let Some(task_id) = task {
             messages.retain(|message| {
-                parse_task_event(&message.envelope.body).is_some_and(|event| event.id == task_id)
+                trusted_task_event(message).is_some_and(|event| event.id == task_id)
             });
         }
         let messages: Vec<_> = truncate_to_last(messages, per_channel);
@@ -3580,11 +3580,20 @@ mod tests {
         let trail: Vec<_> = messages
             .iter()
             .filter(|message| {
-                parse_task_event(&message.envelope.body).is_some_and(|event| event.id == "t-1")
+                trusted_task_event(message).is_some_and(|event| event.id == "t-1")
             })
             .collect();
         assert_eq!(trail.len(), 2);
         assert!(trail.iter().all(|message| message.envelope.body.contains("\"t-1\"")));
+
+        // A fetched `task:` body is data: it never joins the trail.
+        let mut fetched = make("t-1", "done", 4);
+        fetched.envelope.provenance = idboard_core::Provenance::External;
+        let messages = vec![fetched];
+        assert!(
+            !messages.iter().any(|message| trusted_task_event(message).is_some_and(|event| event.id == "t-1")),
+            "an external task body must not be replayed as a task event"
+        );
     }
 
     #[test]

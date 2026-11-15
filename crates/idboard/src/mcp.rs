@@ -577,8 +577,7 @@ fn call_tool<B: Backend>(
                     .into_iter()
                     .filter(|message| {
                         task.is_none_or(|id| {
-                            crate::tasks::parse_task_event(&message.envelope.body)
-                                .is_some_and(|event| event.id == id)
+                            crate::tasks::trusted_task_event(message).is_some_and(|event| event.id == id)
                         })
                     })
                     .map(|message| {

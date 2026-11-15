@@ -1005,6 +1005,53 @@ fn a_peer_that_never_writes_to_the_relay_cannot_wedge_the_wrapper() {
 /// command line exceeds the Windows command-line limit — which is a property of
 /// `CreateProcess`, not of keryx, and would make this test fail for the wrong
 /// reason.
+/// An unauthenticated peer cannot make the daemon allocate without bound.
+///
+/// The frame reader has no peer-declared length to trust — the wire is
+/// newline-delimited — and the cap is applied to the buffer *before* each
+/// extension, so a stream of bytes with no newline costs at most
+/// `MAX_FRAME_BYTES`. This drives that through the real socket, unauthenticated,
+/// and then checks the daemon is still serving: a refusal that took the worker
+/// down with it would be a different bug.
+#[test]
+fn an_oversized_unauthenticated_frame_is_refused_and_the_daemon_survives() {
+    let b = TestBoard::start();
+
+    let stream = idboard_ipc::connect(&b.socket).expect("connect to the daemon");
+    // The writer runs on its own thread: once the daemon crosses the cap it
+    // stops reading, so the tail of the write blocks. That blocked write *is*
+    // the refusal; the reply is read on the other half of the duplex pipe.
+    let writer = idboard_ipc::split(&stream).expect("clone the stream for writing");
+    let handle = std::thread::spawn(move || {
+        let mut writer = writer;
+        let chunk = vec![b'{'; 4 * 1024];
+        for _ in 0..(idboard_ipc::MAX_FRAME_BYTES / chunk.len() + 4) {
+            if writer.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+    });
+
+    let res = idboard_ipc::read_frame_deadline::<DaemonResponse>(&stream)
+        .expect("the daemon answers an oversized frame instead of dropping the connection");
+    let res = res.expect("a frame, not a clean close");
+    assert!(!res.ok, "an oversized frame must not be accepted: {res:?}");
+    assert_eq!(
+        res.error,
+        Some(ErrorCode::BadRequest),
+        "an oversized frame is a malformed request, not an authorisation failure: {res:?}"
+    );
+    // Not joined on purpose: if the daemon closed the pipe first, this thread is
+    // parked in a write that will fail on its own. Joining would make the test
+    // depend on which side noticed first.
+    drop(handle);
+
+    // The worker pool is still healthy: an ordinary signed post lands.
+    let out = b.post("eng-01", "general", "after the oversized frame");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(b.senders("general"), ["eng-01"]);
+}
+
 #[test]
 fn a_backlog_larger_than_one_frame_is_still_readable() {
     let b = TestBoard::start();

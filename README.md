@@ -582,6 +582,13 @@ These are chosen, not overlooked.
   connections and fan out. If dogfooding shows staleness actually matters, the
   fix is a long-lived subscription behind the same interface, not a protocol
   change.
+- **Every frame is bounded, and the bound is applied before the allocation.**
+  The wire is newline-delimited JSON with no peer-declared length to trust, so
+  there is nothing to believe before authentication. `idboard_ipc` refuses a
+  frame past 1 MiB while it is being accumulated, and a read response is bounded
+  separately at 256 KiB by the store, so the daemon cannot build an answer the
+  transport would then refuse to write. A backlog larger than one frame is paged,
+  not unreadable.
 - **No I/O timeouts on Windows named pipes.** The platform has no equivalent of
   `SO_RCVTIMEO` for pipe handles, and `interprocess` reports `Unsupported`
   unconditionally — so `apply_timeouts` installs nothing there, on every call, and

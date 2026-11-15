@@ -620,12 +620,12 @@ pub(crate) fn cmd_keygen(identity: &str, pubkey_only: bool, dry_run: bool, force
     Ok(0)
 }
 
-pub(crate) fn cmd_instructions(json: bool, harness: HarnessArg, identity: Option<&str>) -> Result<i32> {
+pub(crate) fn cmd_instructions(json: bool, harness: HarnessArg, identity: Option<&str>, all: bool) -> Result<i32> {
     if let Some(name) = identity {
         validate_identity(name)?;
     }
     let name = identity.unwrap_or("<identity>");
-    let text = instructions_text(harness, name);
+    let text = instructions_text(harness, name, all);
 
     if json {
         println!(

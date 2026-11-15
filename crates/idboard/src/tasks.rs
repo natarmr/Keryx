@@ -25,6 +25,7 @@
 //!   claim, or from the task's creator while nobody holds it.
 //! - A `reopen` is honoured from the creator or from the identity that last
 //!   held the task.
+//! - A `link` is honoured only from the creator or the current live claimer.
 //!
 //! An ignored event is a normal signed message that stays on the board: the
 //! post succeeds, the state does not change. That is a client-side property,
@@ -330,6 +331,10 @@ pub fn collect_tasks_from_messages_at(
             }
             "link" => {
                 if let Some((task, _, _, _)) = tasks.get_mut(&ev.id) {
+                    let holder = live_claimer(task, at);
+                    if !owns_or_created(task, holder, sender) {
+                        continue;
+                    }
                     if let Some(dep) = ev.depends_on {
                         if !task.depends_on.contains(&dep) {
                             task.depends_on.push(dep);
@@ -682,5 +687,65 @@ mod tests {
         let records = collect_tasks_from_messages_at(creator, "general", 1_000_000);
         assert!(!records[0].view.done, "the creator can reopen");
         assert_eq!(records[0].view.result, None, "reopen clears the outcome");
+    }
+
+    /// Only the creator (while unclaimed) or the live claimer may add a
+    /// prerequisite. A `link` from a stranger is a valid signed post whose
+    /// effect is ignored, like `done`/`abandon` from a non-holder.
+    #[test]
+    fn link_only_the_owner_may_add_a_prerequisite() {
+        // t-o: created by eng-01, unclaimed. A link from eng-02 must be ignored.
+        let stranger = vec![
+            envelope(r#"task:{"v":1,"id":"t-o","kind":"create","title":"owned"}"#, 1, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-dep","kind":"create","title":"dep"}"#, 2, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-o","kind":"link","depends_on":"t-dep"}"#, 3, "eng-02"),
+        ];
+        let records = collect_tasks_from_messages_at(stranger, "general", 1_000_000);
+        let t_o = records.iter().find(|r| r.view.id == "t-o").unwrap();
+        assert!(t_o.view.depends_on.is_empty(), "a stranger cannot link a task it does not own");
+
+        // Same task, link from the creator must be honoured.
+        let creator = vec![
+            envelope(r#"task:{"v":1,"id":"t-o","kind":"create","title":"owned"}"#, 1, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-dep","kind":"create","title":"dep"}"#, 2, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-o","kind":"link","depends_on":"t-dep"}"#, 3, "eng-01"),
+        ];
+        let records = collect_tasks_from_messages_at(creator, "general", 1_000_000);
+        let t_o = records.iter().find(|r| r.view.id == "t-o").unwrap();
+        assert_eq!(t_o.view.depends_on, vec!["t-dep"], "the creator may link unclaimed work");
+
+        // Claimed by eng-01, a link from eng-02 (not holder, not creator) is ignored.
+        let claimed_stranger = vec![
+            envelope(r#"task:{"v":1,"id":"t-c","kind":"create","title":"claimed"}"#, 1, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-c","kind":"claim"}"#, 2, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-c","kind":"link","depends_on":"t-dep"}"#, 3, "eng-02"),
+        ];
+        let records = collect_tasks_from_messages_at(claimed_stranger, "general", 5_000);
+        let t_c = records.iter().find(|r| r.view.id == "t-c").unwrap();
+        assert!(t_c.view.depends_on.is_empty(), "only the live claimer may link a claimed task");
+
+        // Same claimed task, link from the live claimer is honoured.
+        let holder = vec![
+            envelope(r#"task:{"v":1,"id":"t-c","kind":"create","title":"claimed"}"#, 1, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-c","kind":"claim"}"#, 2, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-c","kind":"link","depends_on":"t-dep"}"#, 3, "eng-01"),
+        ];
+        let records = collect_tasks_from_messages_at(holder, "general", 5_000);
+        let t_c = records.iter().find(|r| r.view.id == "t-c").unwrap();
+        assert_eq!(t_c.view.depends_on, vec!["t-dep"], "the live claimer may link");
+
+        // After lease lapses the claim is dead: the creator may link again.
+        let lapsed = vec![
+            envelope(r#"task:{"v":1,"id":"t-l","kind":"create","title":"leased"}"#, 1, "eng-01"),
+            envelope(
+                r#"task:{"v":1,"id":"t-l","kind":"claim","lease_ms":1000,"claimed_at_ms":1000}"#,
+                2,
+                "eng-02",
+            ),
+            envelope(r#"task:{"v":1,"id":"t-l","kind":"link","depends_on":"t-dep"}"#, 3, "eng-01"),
+        ];
+        let records = collect_tasks_from_messages_at(lapsed, "general", 1_000_000);
+        let t_l = records.iter().find(|r| r.view.id == "t-l").unwrap();
+        assert_eq!(t_l.view.depends_on, vec!["t-dep"], "after a lease lapses the creator may link again");
     }
 }

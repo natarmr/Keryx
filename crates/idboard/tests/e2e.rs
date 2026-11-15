@@ -1992,6 +1992,57 @@ fn a_non_claimant_cannot_complete_or_abandon_someone_elses_task() {
     );
 }
 
+#[test]
+fn a_non_owner_cannot_link_a_prerequisite() {
+    let b = TestBoard::start();
+
+    let a = b.as_identity("eng-01", &["task", "create", "general", "task A"]);
+    assert!(a.status.success(), "{}", String::from_utf8_lossy(&a.stderr));
+    let id_a = extract_task_id(&a);
+    let c = b.as_identity("eng-01", &["task", "create", "general", "task C"]);
+    assert!(c.status.success(), "{}", String::from_utf8_lossy(&c.stderr));
+    let id_c = extract_task_id(&c);
+
+    // eng-02 can post to `general`, so it can send a link. The fold must ignore it
+    // because eng-02 neither created t-a nor holds its live claim.
+    let linked = b.as_identity("eng-02", &["task", "link", "general", &id_a, &id_c]);
+    assert!(linked.status.success(), "{}", String::from_utf8_lossy(&linked.stderr));
+
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("task list --json");
+    let task = v["tasks"].as_array().unwrap().iter().find(|t| t["id"] == id_a).expect("task listed");
+    assert!(
+        task["depends_on"].as_array().unwrap().is_empty(),
+        "a link from a non-owner must be ignored: {v}"
+    );
+
+    // The creator may link its own unclaimed task — the normal path must stay open.
+    let ok = b.as_identity("eng-01", &["task", "link", "general", &id_a, &id_c]);
+    assert!(ok.status.success(), "{}", String::from_utf8_lossy(&ok.stderr));
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("task list --json");
+    let task = v["tasks"].as_array().unwrap().iter().find(|t| t["id"] == id_a).expect("task listed");
+    assert_eq!(task["depends_on"][0], id_c, "the creator may link unclaimed work: {v}");
+
+    // Claimed by eng-01, a link from eng-02 must still be ignored.
+    let b2 = TestBoard::start();
+    let a = b2.as_identity("eng-01", &["task", "create", "general", "claimed"]);
+    let id_a = extract_task_id(&a);
+    let dep = b2.as_identity("eng-01", &["task", "create", "general", "dep"]);
+    let id_dep = extract_task_id(&dep);
+    let claimed = b2.as_identity("eng-01", &["task", "claim", "general", &id_a]);
+    assert!(claimed.status.success(), "{}", String::from_utf8_lossy(&claimed.stderr));
+    let linked = b2.as_identity("eng-02", &["task", "link", "general", &id_a, &id_dep]);
+    assert!(linked.status.success(), "{}", String::from_utf8_lossy(&linked.stderr));
+    let listed = b2.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("task list --json");
+    let task = v["tasks"].as_array().unwrap().iter().find(|t| t["id"] == id_a).expect("task listed");
+    assert!(
+        task["depends_on"].as_array().unwrap().is_empty(),
+        "only the live claimer may link a claimed task: {v}"
+    );
+}
+
 /// Pins the *current* shape of `allow_external`: it is a declared-value policy.
 ///
 /// A child chooses the provenance it sends, so an agent that declares `self` for

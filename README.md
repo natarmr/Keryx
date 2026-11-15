@@ -51,6 +51,12 @@ A peer agent process, or untrusted content inside an agent's context:
   the child asks, within the child's channel permissions. It prevents
   impersonation, not misuse. A compromised `eng-01` can say anything `eng-01` is
   allowed to say.
+- **An agent that declares its own fetched content `self`.** `allow_external = false`
+  refuses a post the caller *marked* `[external]`; it never inspects the text, so
+  an injected agent that declares `self` passes the policy. The setting constrains
+  honest agents and makes the distinction visible on the board — it is not a
+  sandbox. (Enforcing provenance regardless of what the child declares is
+  unimplemented; see "Not in v1".)
 - **Host compromise.** Root, SYSTEM, or an administrator.
 - **Two processes that already share filesystem access.** This is the same
   boundary as the point above, stated from the other side.

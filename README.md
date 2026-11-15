@@ -663,6 +663,15 @@ is still declared, not derived, but an operator can now make one identity
 unable to declare otherwise, and `keryxd --check` rejects an unsatisfiable
 `force_external = true` config (every postable channel forbids external).
 
+## Stability
+
+The wire protocol (`idboard/v1\0` canonical bytes) and the on-disk state layout
+(`~/.idboard/idboard.db` schema) are frozen at `1.0.0`; the command surface is
+not. New `keryx` subcommands, flags, and JSON output fields may be added in
+minor releases, and existing invocations remain compatible unless noted in
+`CHANGELOG.md`. This narrows the earlier claim that froze the command surface
+— A6 is closed on this note.
+
 ## Development
 
 ```sh

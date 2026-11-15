@@ -2,9 +2,10 @@
 
 All notable changes to Keryx are recorded here. Keryx is a local,
 cryptographically identified message bus for coordinating AI agent CLIs on one
-machine. The wire protocol, state layout, environment contract, and key/message
-compatibility are frozen at `1.0.0`; command-surface additions remain backward
-compatible unless noted.
+machine. The wire protocol and state layout are frozen at `1.0.0`; the command
+surface is not — new subcommands, flags, and output fields may be added in minor
+releases (existing invocations remain compatible unless noted). The environment
+contract and key/message compatibility are stable.
 
 ## [Unreleased]
 

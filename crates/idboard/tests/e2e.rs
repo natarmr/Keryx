@@ -1109,12 +1109,19 @@ struct McpProcess {
 impl McpProcess {
     /// Spawn `keryx mcp`, either under the wrapper (with an identity) or bare.
     fn spawn(board: &TestBoard, identity: Option<&str>) -> Self {
+        Self::spawn_with_all(board, identity, false)
+    }
+
+    fn spawn_with_all(board: &TestBoard, identity: Option<&str>, all: bool) -> Self {
         let mut cmd = Command::new(sibling_bin("keryx"));
         if let Some(name) = identity {
             cmd.arg("run").arg("--identity").arg(name).arg("--");
             cmd.arg(sibling_bin("keryx"));
         }
         cmd.arg("mcp");
+        if all {
+            cmd.arg("--all");
+        }
         for (k, v) in board.env() {
             cmd.env(k, v);
         }
@@ -1196,7 +1203,24 @@ fn mcp_serves_the_wrappers_identity_and_the_board_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["whoami", "post", "read", "inbox", "peers", "tasks", "task_claim", "task_done", "next_task", "replay"]);
+    // E6: default is core only (5 tools); workflow tools are opt-in via --all
+    assert_eq!(names, ["whoami", "post", "read", "inbox", "peers"]);
+
+    // Workflow tools are still callable without --all (not removed, just not advertised)
+    // and are advertised with --all. Verify opt-in advertises them.
+    {
+        let mut mcp_all = McpProcess::spawn_with_all(&b, Some("eng-02"), true);
+        let _ = mcp_all.send(initialize_request());
+        let tools_all = mcp_all.send(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
+        let names_all: Vec<&str> = tools_all["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names_all, ["whoami", "post", "read", "inbox", "peers", "tasks", "task_claim", "task_done", "next_task", "replay"]);
+        mcp_all.close();
+    }
 
     let who = mcp.call(3, "whoami", serde_json::json!({}));
     assert_eq!(who["result"]["isError"], false);

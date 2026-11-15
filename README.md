@@ -515,7 +515,12 @@ inspects text to decide what is external; the wrapper downgrades a `force_extern
 identity's `self` to `external` *before* signing (so the signature covers the
 real value), and the daemon rejects a forged `self` from that identity with
 `provenance_rejected` (after `authorize`, before the budget, so it is never
-stored and never charged). Without the floor, the caller chooses the provenance
+stored and never charged). Task `task:` bodies from a `force_external` identity
+are stored as `external` and ignored by the task fold (`trusted_task_event`);
+`keryx task` refuses early with `provenance_rejected` instead of a silent no-op.
+A wrapper started before the config edit is stale and its next `self` post is
+rejected the same way; a fresh `keryx run` after the edit downgrades and
+succeeds as `external`. Without the floor, the caller chooses the provenance
 and the daemon only enforces the declared channel policy. The floor is visible in
 `keryxd --check`, `keryxd --show-acl`, and `keryx admin report` (the identity
 row shows `force_external=true`), and `--check` refuses a config where a

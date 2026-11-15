@@ -152,6 +152,14 @@ pub struct RelayIdentity {
     pub fingerprint: String,
     /// The wrapper's process id. Useful in error reports.
     pub pid: u32,
+    /// Whether this identity has `force_external = true` in the daemon config.
+    ///
+    /// When true, every post is `external` and task events are ignored by the
+    /// fold. Carried here so `keryx task` can fail fast with a clear message
+    /// instead of a silent no-op, and so a stale wrapper (started before the
+    /// config edit) can be told it is stale without a second round trip.
+    #[serde(default)]
+    pub force_external: bool,
 }
 
 /// Uniform error reply shape for both hops.

@@ -762,6 +762,7 @@ mod tests {
                 identity: "eng-01".into(),
                 fingerprint: "0011223344556677".into(),
                 pid: 4242,
+                force_external: false,
             })
         }
 

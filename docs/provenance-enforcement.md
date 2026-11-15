@@ -66,6 +66,27 @@ Used only for the floor violation above. `allow_external = false` remains
   per identity (`crates/idboard/src/cli.rs:1841`), shown in both `--json` and
   text.
 
+## Tasks and `force_external`
+
+Task state is a fold over stored messages, gated by `trusted_task_event`
+(`crates/idboard/src/tasks.rs:217`): only `SelfOriginated` `task:` bodies move
+state. Every post from a `force_external` identity is `external` (wrapper
+downgrades before signing), so every `task:` body from such an identity is
+stored but ignored by the fold — `create` never creates, `claim`/`done`/`link`
+never change ownership. This is intentional: a fetcher should not coordinate
+work. `keryx task` checks `whoami.force_external` before posting and fails
+fast with `ProvenanceRejected` and the message
+“has force_external=true; task events … are stored as external and ignored by
+the task fold”, instead of posting a silent no-op (`crates/idboard/src/cli.rs:
+ensure_task_write_allowed`).
+
+A config edit made while a wrapper is running leaves the wrapper stale: it
+still signs `self`, the daemon now has `force_external=true` and rejects the
+envelope with `ProvenanceRejected` (after `authorize`, before budget). The
+post is never stored and never charged, and the wrapper surfaces the error on
+its next `client.post`. A fresh wrapper started after the edit downgrades and
+succeeds as `external`.
+
 ## Tests
 
 * `idboardd` unit `force_external_identities_may_only_post_external` (`crates/idboardd/src/lib.rs`):
@@ -80,6 +101,11 @@ Used only for the floor violation above. `allow_external = false` remains
 * `idboard` relay unit `force_external_downgrades_self_before_signing`
   (`crates/idboard/src/relay.rs`): wrapper downgrade before forward.
 
+* `idboard` tasks unit `force_external_task_events_are_ignored_by_the_fold`
+  (`crates/idboard/src/tasks.rs`): external `create`/`claim`/`link`/`done`
+  from fetcher never create tasks; mixed board shows honest create but external
+  claim is ignored.
+
 * e2e `force_external_honest_wrapper_downgrades_self_to_external`
   (`crates/idboard/tests/e2e.rs`): `keryx run --identity fetcher -- keryx post … --provenance self`
   is stored as `external` and renders `[external]`.
@@ -87,6 +113,16 @@ Used only for the floor violation above. `allow_external = false` remains
 * e2e `force_external_forged_self_is_rejected_with_provenance_rejected`
   (`crates/idboard/tests/e2e.rs`): `daemon_raw` self → `provenance_rejected`,
   not stored, same seq with `external` then accepted, stored equals signed.
+
+* e2e `force_external_task_events_are_ignored_and_task_command_fails_fast`
+  (`crates/idboard/tests/e2e.rs`): `keryx task create` from fetcher is refused
+  with `provenance_rejected` and `force_external` in the detail; external
+  `task:` bypass still stored but not folded; honest identity's task appears.
+
+* e2e `stale_wrapper_after_force_external_edit_gets_provenance_rejected`
+  (`crates/idboard/tests/e2e.rs`): self before edit accepted, stale wrapper's
+  next self after `force_external=true` and daemon restart → `provenance_rejected`,
+  fresh wrapper's self downgraded to `external` and accepted.
 
 The previous pin `allow_external_only_checks_the_declared_provenance` remains,
 now using an identity *without* the flag, so the declared-value property stays

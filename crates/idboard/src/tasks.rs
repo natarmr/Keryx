@@ -689,6 +689,35 @@ mod tests {
         assert_eq!(records[0].view.result, None, "reopen clears the outcome");
     }
 
+    /// A `force_external` identity's task events are `external` by construction
+    /// (the wrapper downgrades before signing), so the fold must ignore every
+    /// `task:` body from such a sender. This is the same gate as B2, and the
+    /// reason `keryx task` refuses early with `ProvenanceRejected` instead of
+    /// posting a silent no-op.
+    #[test]
+    fn force_external_task_events_are_ignored_by_the_fold() {
+        // Fetcher creates a task, claims it, links, completes — all as external.
+        // The board records the posts (as external), but the fold sees nothing.
+        let msgs = vec![
+            external_envelope(r#"task:{"v":1,"id":"t-f","kind":"create","title":"fetched work"}"#, 1, "fetcher"),
+            external_envelope(r#"task:{"v":1,"id":"t-f","kind":"claim"}"#, 2, "fetcher"),
+            external_envelope(r#"task:{"v":1,"id":"t-f","kind":"link","depends_on":"t-other"}"#, 3, "fetcher"),
+            external_envelope(r#"task:{"v":1,"id":"t-f","kind":"done","result":"ok"}"#, 4, "fetcher"),
+        ];
+        let records = collect_tasks_from_messages_at(msgs, "general", 1_000_000);
+        assert!(records.is_empty(), "external task events must not create tasks: {records:?}");
+
+        // Mixed board: an honest `create` from eng-01 is real, a fetcher's
+        // `claim` of the same id is external and must be ignored.
+        let mixed = vec![
+            envelope(r#"task:{"v":1,"id":"t-m","kind":"create","title":"mixed"}"#, 1, "eng-01"),
+            external_envelope(r#"task:{"v":1,"id":"t-m","kind":"claim"}"#, 2, "fetcher"),
+        ];
+        let records = collect_tasks_from_messages_at(mixed, "general", 1_000_000);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].view.claimed_by, None, "external claim must be ignored");
+    }
+
     /// Only the creator (while unclaimed) or the live claimer may add a
     /// prerequisite. A `link` from a stranger is a valid signed post whose
     /// effect is ignored, like `done`/`abandon` from a non-holder.

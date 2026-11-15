@@ -147,6 +147,7 @@ impl Relay {
                 identity: self.identity.clone(),
                 fingerprint: self.signer.fingerprint().to_string(),
                 pid: std::process::id(),
+                force_external: self.force_external,
             })),
             RelayRequest::Inbox { limit, .. } => self.inbox(*limit),
             RelayRequest::Peers { .. } => self.peers(),

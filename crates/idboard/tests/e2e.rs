@@ -2147,6 +2147,97 @@ fn force_external_forged_self_is_rejected_with_provenance_rejected() {
 }
 
 #[test]
+fn force_external_task_events_are_ignored_and_task_command_fails_fast() {
+    let mut b = TestBoard::start();
+    let fetcher_keys = b.generate_keys(&["fetcher"]);
+    let cfg = std::fs::read_to_string(&b.config).unwrap();
+    std::fs::write(
+        &b.config,
+        format!(
+            "{cfg}\n[identity.fetcher]\nrole = \"fetcher\"\npubkey = \"{}\"\nforce_external = true\n",
+            fetcher_keys["fetcher"]
+        ),
+    )
+    .unwrap();
+    b.restart_daemon();
+
+    // `keryx task` from a force_external identity must fail fast with a clear
+    // message, not post a silent no-op that the fold ignores.
+    let out = b.as_identity("fetcher", &["task", "create", "general", "fetched work"]);
+    assert!(!out.status.success(), "task create from force_external must be refused: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("provenance_rejected"), "must be ProvenanceRejected: {stderr}");
+    assert!(stderr.contains("force_external"), "{stderr}");
+
+    // Even if the wrapper check is bypassed, the daemon stores the post as
+    // external (downgraded before signing) and the fold ignores it.
+    // Simulate the bypass via daemon_raw external task create.
+    let seed = std::fs::read(b.home.path().join("keys").join("fetcher.key")).unwrap();
+    let fetcher_signer = idboard_core::keys::LocalSigner::from_seed(&seed.try_into().unwrap(), "fetcher").unwrap();
+    let env = fetcher_signer
+        .sign_post("general", r#"task:{"v":1,"id":"t-f","kind":"create","title":"bypass"}"#, Provenance::External, 1, idboard_core::now_ms())
+        .unwrap();
+    let req = DaemonRequest { v: PROTOCOL_VERSION, envelope: env, since: 0, limit: 0 };
+    let res = b.daemon_raw(&req).unwrap();
+    assert!(res.ok, "external task create must be stored: {res:?}");
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let tasks = v["tasks"].as_array().unwrap();
+    assert!(tasks.is_empty(), "external task create must not appear in fold: {v}");
+
+    // Normal identity can still create tasks.
+    let out = b.as_identity("eng-01", &["task", "create", "general", "real work"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(v["tasks"].as_array().unwrap().len(), 1, "honest task must appear: {v}");
+}
+
+#[test]
+fn stale_wrapper_after_force_external_edit_gets_provenance_rejected() {
+    // Start with fetcher not forced, so a self post succeeds.
+    let mut b = TestBoard::start();
+    let fetcher_keys = b.generate_keys(&["fetcher"]);
+    let mut cfg = std::fs::read_to_string(&b.config).unwrap();
+    cfg = format!("{cfg}\n[identity.fetcher]\nrole = \"fetcher\"\npubkey = \"{}\"\n", fetcher_keys["fetcher"]);
+    std::fs::write(&b.config, &cfg).unwrap();
+    b.restart_daemon();
+
+    let seed_before = std::fs::read(b.home.path().join("keys").join("fetcher.key")).unwrap();
+    let fetcher_signer = idboard_core::keys::LocalSigner::from_seed(&seed_before.try_into().unwrap(), "fetcher").unwrap();
+    let env = fetcher_signer.sign_post("general", "before edit", Provenance::SelfOriginated, 1, idboard_core::now_ms()).unwrap();
+    let req = DaemonRequest { v: PROTOCOL_VERSION, envelope: env, since: 0, limit: 0 };
+    let res = b.daemon_raw(&req).unwrap();
+    assert!(res.ok, "self before config edit must be accepted: {res:?}");
+
+    // Edit config to force_external = true while the wrapper (signer) is still
+    // the old one, and restart the daemon. The daemon now has the new policy,
+    // the stale wrapper still signs self.
+    let cfg = std::fs::read_to_string(&b.config).unwrap();
+    // Replace the identity block to add force_external
+    let cfg = cfg.replace("[identity.fetcher]\nrole = \"fetcher\"", "[identity.fetcher]\nrole = \"fetcher\"\nforce_external = true");
+    // If replace did not fire (formatting), just append a second block — last wins.
+    let cfg = if cfg.contains("force_external") { cfg } else { format!("{cfg}\n[identity.fetcher]\nforce_external = true\n") };
+    std::fs::write(&b.config, cfg).unwrap();
+    b.restart_daemon();
+
+    // Stale wrapper's next self post (seq 2) must be rejected, not silently stored.
+    let env = fetcher_signer.sign_post("general", "stale self", Provenance::SelfOriginated, 2, idboard_core::now_ms()).unwrap();
+    let req = DaemonRequest { v: PROTOCOL_VERSION, envelope: env, since: 0, limit: 0 };
+    let res = b.daemon_raw(&req).unwrap();
+    assert!(!res.ok, "stale wrapper self must be rejected: {res:?}");
+    assert_eq!(res.error, Some(ErrorCode::ProvenanceRejected), "{res:?}");
+
+    // Fresh wrapper (new Relay with force_external true) downgrades and succeeds.
+    let out = b.as_identity("fetcher", &["post", "general", "fresh external", "--provenance", "self"]);
+    assert!(out.status.success(), "fresh wrapper must downgrade and succeed: {}", String::from_utf8_lossy(&out.stderr));
+    let read = b.as_identity("eng-01", &["read", "general", "--since", "0", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&read.stdout).unwrap();
+    let msg = v["messages"].as_array().unwrap().iter().find(|m| m["body"] == "fresh external").unwrap();
+    assert_eq!(msg["provenance"], "external");
+}
+
+#[test]
 fn an_external_task_event_is_data_not_a_state_change() {
     let b = TestBoard::start();
 

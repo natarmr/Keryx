@@ -1331,6 +1331,20 @@ fn cmd_cursor(json: bool, channel: &str, clear: bool, set: Option<i64>) -> Resul
     }
 }
 
+fn ensure_task_write_allowed(client: &RelayClient) -> Result<()> {
+    let who = client.whoami()?;
+    if who.force_external {
+        return Err(idboard_core::error::CoreError::new(
+            idboard_core::error::ErrorCode::ProvenanceRejected,
+            format!(
+                "identity {:?} has force_external=true; task events from this identity are stored as external and ignored by the task fold. Task create/claim/complete/link are no-ops for this identity; use a non-fetcher identity for tasks",
+                who.identity
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
     let command = command.unwrap_or(TaskCommand::List { channel: None, open: true, all: false, mine: false, stale: None });
     match command {
@@ -1355,6 +1369,13 @@ fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
             let body = format!("task:{}", event);
             validate_body(&body)?;
             let client = RelayClient::from_env()?;
+            if let Err(e) = ensure_task_write_allowed(&client) {
+                if json {
+                    println!("{}", serde_json::json!({ "ok": false, "error": e.code.as_str(), "detail": e.detail }));
+                    return Ok(1);
+                }
+                return Err(e);
+            }
             let res = match client.post(&channel, &body, Provenance::SelfOriginated) {
                 Ok(res) => res,
                 Err(e) => {
@@ -1385,6 +1406,16 @@ fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
         TaskCommand::Claim { channel, task_id, lease } => {
             validate_channel(&channel)?;
             let lease_ms = lease.as_deref().map(parse_duration_ms).transpose()?;
+            {
+                let client = RelayClient::from_env()?;
+                if let Err(e) = ensure_task_write_allowed(&client) {
+                    if json {
+                        println!("{}", serde_json::json!({ "ok": false, "error": e.code.as_str(), "detail": e.detail }));
+                        return Ok(1);
+                    }
+                    return Err(e);
+                }
+            }
             let mut event = serde_json::json!({ "v": 1, "id": task_id, "kind": "claim" });
             if let Some(lease_ms) = lease_ms {
                 event["lease_ms"] = serde_json::json!(lease_ms);
@@ -1394,6 +1425,16 @@ fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
         }
         TaskCommand::Done { channel, task_id } => {
             validate_channel(&channel)?;
+            {
+                let client = RelayClient::from_env()?;
+                if let Err(e) = ensure_task_write_allowed(&client) {
+                    if json {
+                        println!("{}", serde_json::json!({ "ok": false, "error": e.code.as_str(), "detail": e.detail }));
+                        return Ok(1);
+                    }
+                    return Err(e);
+                }
+            }
             let body = serde_json::json!({ "v": 1, "id": task_id, "kind": "done", "result": "ok" });
             cmd_post(json, &channel, &format!("task:{}", body), Provenance::SelfOriginated)
         }
@@ -1408,6 +1449,16 @@ fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
                 return Err(idboard_core::error::CoreError::bad_request(
                     "a task cannot depend on itself",
                 ));
+            }
+            {
+                let client = RelayClient::from_env()?;
+                if let Err(e) = ensure_task_write_allowed(&client) {
+                    if json {
+                        println!("{}", serde_json::json!({ "ok": false, "error": e.code.as_str(), "detail": e.detail }));
+                        return Ok(1);
+                    }
+                    return Err(e);
+                }
             }
             let body = serde_json::json!({ "v": 1, "id": task_id, "kind": "link", "depends_on": depends_on });
             cmd_post(json, &channel, &format!("task:{}", body), Provenance::SelfOriginated)
@@ -1449,16 +1500,46 @@ fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
         }
         TaskCommand::Reopen { channel, task_id } => {
             validate_channel(&channel)?;
+            {
+                let client = RelayClient::from_env()?;
+                if let Err(e) = ensure_task_write_allowed(&client) {
+                    if json {
+                        println!("{}", serde_json::json!({ "ok": false, "error": e.code.as_str(), "detail": e.detail }));
+                        return Ok(1);
+                    }
+                    return Err(e);
+                }
+            }
             let body = serde_json::json!({ "v": 1, "id": task_id, "kind": "reopen" });
             cmd_post(json, &channel, &format!("task:{}", body), Provenance::SelfOriginated)
         }
         TaskCommand::Abandon { channel, task_id } => {
             validate_channel(&channel)?;
+            {
+                let client = RelayClient::from_env()?;
+                if let Err(e) = ensure_task_write_allowed(&client) {
+                    if json {
+                        println!("{}", serde_json::json!({ "ok": false, "error": e.code.as_str(), "detail": e.detail }));
+                        return Ok(1);
+                    }
+                    return Err(e);
+                }
+            }
             let body = serde_json::json!({ "v": 1, "id": task_id, "kind": "abandon" });
             cmd_post(json, &channel, &format!("task:{}", body), Provenance::SelfOriginated)
         }
         TaskCommand::Reclaim { channel, task_id } => {
             validate_channel(&channel)?;
+            {
+                let client = RelayClient::from_env()?;
+                if let Err(e) = ensure_task_write_allowed(&client) {
+                    if json {
+                        println!("{}", serde_json::json!({ "ok": false, "error": e.code.as_str(), "detail": e.detail }));
+                        return Ok(1);
+                    }
+                    return Err(e);
+                }
+            }
             let body = serde_json::json!({ "v": 1, "id": task_id, "kind": "reclaim" });
             cmd_post(json, &channel, &format!("task:{}", body), Provenance::SelfOriginated)
         }
@@ -1559,6 +1640,9 @@ fn cmd_task(json: bool, command: Option<TaskCommand>) -> Result<i32> {
             }
             let body = read_body(body.as_deref(), body_file.as_deref())?;
             let client = RelayClient::from_env()?;
+            if let Err(e) = ensure_task_write_allowed(&client) {
+                return json_or_result_error(json, &e);
+            }
             let post_body = |body: &str| client.post(&channel, body, Provenance::SelfOriginated);
             let report = match post_body(&body) {
                 Ok(res) => res,

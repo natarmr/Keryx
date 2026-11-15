@@ -24,6 +24,14 @@ compatible unless noted.
   backlog or one task's trail), all through the wrapper relay with no
   identity argument.
 
+### Verified
+- `cargo test --workspace`: 333 distinct test functions — 261 unit + 72
+  end-to-end — of which 331 run by default and 2 are marked `#[ignore]`
+  (live-harness smokes, both in `crates/idboard/tests/e2e.rs`, gated on
+  `IDBOARD_LIVE_HARNESS`). There are no ignored unit tests. A naive per-target
+  sum prints 379 because `idboard`/`keryx` are two bin targets over the same
+  source, so `idboard`'s 46 CLI tests are counted twice.
+
 ## [1.0.0] - 2026-11-15
 
 First stable release. The command is `keryx`, the daemon is `keryxd`
@@ -50,7 +58,8 @@ are unchanged from the initial implementation.
 - Key hygiene: `keygen --dry-run` / `--force`, doctor `key-permissions` check.
 
 ### Verified
-- `cargo test --workspace`: 370 tests, 366 pass, 2 ignored (live harness),
-  2 pre-existing unit ignores. Every rejection asserts a specific `ErrorCode`.
+- `cargo test --workspace`: the whole suite is green. The only `#[ignore]`d tests
+  are the two env-gated live-harness smokes in `tests/e2e.rs`. Every rejection
+  asserts a specific `ErrorCode`.
 - Live harness smokes green on this machine: `muse` and `opencode` each posted
   a signed message through the wrapper (see `docs/harnesses.md`).

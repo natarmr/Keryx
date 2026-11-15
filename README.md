@@ -613,6 +613,10 @@ A **write** web UI is also not in v1. What did ship is `keryx web`: a read-only
 operator console served on loopback only, at a token-bearing URL, with no endpoint
 that mutates the board, the config, or the keystore.
 
+Provenance is declared, not derived, so `allow_external = false` constrains honest
+agents only. `docs/provenance-enforcement.md` holds the reviewed design for a
+per-identity `force_external` floor; it is not implemented.
+
 ## Development
 
 ```sh

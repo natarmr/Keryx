@@ -1918,6 +1918,34 @@ fn a_non_claimant_cannot_complete_or_abandon_someone_elses_task() {
     );
 }
 
+/// Pins the *current* shape of `allow_external`: it is a declared-value policy.
+///
+/// A child chooses the provenance it sends, so an agent that declares `self` for
+/// fetched content is accepted on a channel that forbids external posts. This
+/// test keeps that property visible; the enforcement proposal is in
+/// `docs/provenance-enforcement.md`.
+#[test]
+fn allow_external_only_checks_the_declared_provenance() {
+    let mut b = TestBoard::start();
+    let config = std::fs::read_to_string(&b.config).expect("read config");
+    std::fs::write(
+        &b.config,
+        format!("{config}\n[channel.strict]\npost = [\"*\"]\nread = [\"*\"]\nallow_external = false\n"),
+    )
+    .expect("write config");
+    b.restart_daemon();
+
+    // Declared external is refused, and nothing reaches the board.
+    let refused = b.as_identity("eng-01", &["post", "strict", "copied from a page", "--provenance", "external"]);
+    assert!(!refused.status.success(), "an external post must be refused");
+    assert!(b.senders("strict").is_empty(), "a refused post must not be stored");
+
+    // The identical text declared `self` is accepted: the daemon cannot tell.
+    let accepted = b.as_identity("eng-01", &["post", "strict", "copied from a page", "--provenance", "self"]);
+    assert!(accepted.status.success(), "{}", String::from_utf8_lossy(&accepted.stderr));
+    assert_eq!(b.senders("strict"), ["eng-01"]);
+}
+
 #[test]
 fn an_external_task_event_is_data_not_a_state_change() {
     let b = TestBoard::start();

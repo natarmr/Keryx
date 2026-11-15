@@ -10,7 +10,12 @@ blocked and why, and how to add a harness. It is deliberately about the
 harnesses, not about keryx: the keryx side does not change per harness.
 
 Last measured: 2026-11-15, Windows, `opencode` v2.3.0, `muse` v1.4.18,
-`freebuff` v0.0.149.
+`freebuff` v0.0.149. Re-verified `opencode` (14.9s) and `muse` (33.6s) headless
+post-through-wrapper on 2026-11-15 after merging the task-dependency/MCP task-loop
+slice (`05bd738` plus MCP doc follow-up) — both still pass. The new MCP task tools
+(`tasks`, `task_claim`, `task_done`, `next_task`, `replay`) are covered by the
+offline e2e `mcp_serves_the_wrappers_identity_and_the_board_tools` plus the unit
+tests in `idboard::mcp`/`idboard::tasks`.
 
 ## Two integration shapes
 
@@ -42,8 +47,8 @@ roster, never an authorization input).
 
 | Harness | Headless invocation | Status | Notes |
 |---|---|---|---|
-| `muse` 1.4.18 | `muse exec --yolo "<prompt>"` | **Verified** | `scripts\harness-smoke.ps1 -Harness muse` passed (2026-11-13): a real muse agent posted a signed message through the wrapper (env inherited, `keryx` resolved from PATH, board asserted). The launcher shim is resolved to its real `muse-bin-*.exe`. |
-| `opencode` 2.3.0 | `opencode run --auto --format json "<prompt>"` | **Verified** | 2026-11-14 (this machine): `opencode` resolves to `C:\Users\ramra\.bun\bin\opencode.exe`, and `.\scripts\harness-smoke.ps1 -Harness opencode` passed (signed post seen on the board through the wrapper). The earlier failure was npm-shim/V1 config mismatch (`V2 permissions are not supported by OpenCode V1...`), not an keryx defect. |
+| `muse` 1.4.18 | `muse exec --yolo "<prompt>"` | **Verified** | `scripts\harness-smoke.ps1 -Harness muse` passed on 2026-11-13 and re-verified 2026-11-15 (33.6s, after task-dependency merge): a real muse agent posted a signed message through the wrapper (env inherited, `keryx` resolved from PATH, board asserted). The launcher shim is resolved to its real `muse-bin-*.exe`. |
+| `opencode` 2.3.0 | `opencode run --auto --format json "<prompt>"` | **Verified** | 2026-11-14 (this machine): `opencode` resolves to `C:\Users\ramra\.bun\bin\opencode.exe`, and `.\scripts\harness-smoke.ps1 -Harness opencode` passed; re-verified 2026-11-15 (14.9s, after task-dependency merge, model `opencode/minimax-m3.1-flash-free`). The earlier failure was npm-shim/V1 config mismatch (`V2 permissions are not supported by OpenCode V1...`), not an keryx defect. |
 | `opencode2` | same | duplicate | Same npm package/exe lineage as `opencode` on this machine. Not a second harness. |
 | `freebuff` 0.0.149 | none | **Not automatable** | Only `login`, `--continue`, `--cwd`; no prompt or one-shot mode. Would need a PTY driver. |
 | Antigravity | none | **Not automatable** | GUI IDE (`~/.gemini/antigravity`). No CLI harness surface. |

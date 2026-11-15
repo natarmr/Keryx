@@ -2192,6 +2192,10 @@ fn force_external_task_events_are_ignored_and_task_command_fails_fast() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("provenance_rejected"), "must be ProvenanceRejected: {stderr}");
     assert!(stderr.contains("force_external"), "{stderr}");
+    assert!(
+        stderr.contains("task events from an external-forced identity are recorded but do not change task state"),
+        "must print clear line: {stderr}"
+    );
 
     // Even if the wrapper check is bypassed, the daemon stores the post as
     // external (downgraded before signing) and the fold ignores it.

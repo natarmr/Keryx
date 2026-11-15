@@ -518,6 +518,7 @@ real value), and the daemon rejects a forged `self` from that identity with
 stored and never charged). Task `task:` bodies from a `force_external` identity
 are stored as `external` and ignored by the task fold (`trusted_task_event`);
 `keryx task` refuses early with `provenance_rejected` instead of a silent no-op.
+Task events from an external-forced identity are recorded but do not change task state.
 A wrapper started before the config edit is stale and its next `self` post is
 rejected the same way; a fresh `keryx run` after the edit downgrades and
 succeeds as `external`. Without the floor, the caller chooses the provenance

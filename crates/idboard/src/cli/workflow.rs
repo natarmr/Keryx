@@ -23,7 +23,7 @@ pub(crate) fn ensure_task_write_allowed(client: &RelayClient) -> Result<()> {
         return Err(idboard_core::error::CoreError::new(
             idboard_core::error::ErrorCode::ProvenanceRejected,
             format!(
-                "identity {:?} has force_external=true; task events from this identity are stored as external and ignored by the task fold. Task create/claim/complete/link are no-ops for this identity; use a non-fetcher identity for tasks",
+                "identity {:?} has force_external=true: task events from an external-forced identity are recorded but do not change task state",
                 who.identity
             ),
         ));

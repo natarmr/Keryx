@@ -1880,6 +1880,45 @@ fn doctor_strict_fails_on_role_inheritance_warnings() {
 }
 
 #[test]
+fn a_non_claimant_cannot_complete_or_abandon_someone_elses_task() {
+    let b = TestBoard::start();
+
+    let created = b.as_identity("eng-01", &["task", "create", "general", "owned work"]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let task_id = String::from_utf8_lossy(&created.stdout)
+        .split_whitespace()
+        .find(|s| s.starts_with("t-"))
+        .expect("task id")
+        .to_string();
+
+    let claimed = b.as_identity("eng-01", &["task", "claim", "general", &task_id]);
+    assert!(claimed.status.success(), "{}", String::from_utf8_lossy(&claimed.stderr));
+
+    // eng-02 can post to `general`, so it can *send* these events. The fold must
+    // ignore their effect, because eng-01 holds the live claim.
+    let done = b.as_identity("eng-02", &["task", "complete", "general", &task_id, "--body", "not mine"]);
+    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    let abandoned = b.as_identity("eng-02", &["task", "abandon", "general", &task_id]);
+    assert!(abandoned.status.success(), "{}", String::from_utf8_lossy(&abandoned.stderr));
+    let reclaimed = b.as_identity("eng-02", &["task", "reclaim", "general", &task_id]);
+    assert!(reclaimed.status.success(), "{}", String::from_utf8_lossy(&reclaimed.stderr));
+
+    let listed = b.as_identity("eng-01", &["task", "list", "general", "--all", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("task list --json");
+    let task = v["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == task_id)
+        .expect("the task is still listed");
+    assert_eq!(task["done"], false, "a done from a non-claimant must not complete the task: {v}");
+    assert_eq!(
+        task["claimed_by"], "eng-01",
+        "abandon/reclaim from a non-claimant must not move a live claim: {v}"
+    );
+}
+
+#[test]
 fn mention_and_structured_subscribe_stops_on_json_field() {
     let b = TestBoard::start();
 

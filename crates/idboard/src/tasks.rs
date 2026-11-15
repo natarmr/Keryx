@@ -8,6 +8,27 @@
 //! MCP server (`tasks`, `task_claim`, ...) share one implementation. A second
 //! implementation is free to disagree about what "open" means, and the
 //! disagreement would surface only when an agent acted on a stale view.
+//!
+//! # Ownership is enforced here, because nothing else can
+//!
+//! A task is not a protocol object: the daemon sees ordinary posts, so it
+//! cannot know that one `task:` body is a `done` for a task another identity
+//! claimed. The fold is therefore the only place ownership can be decided, and
+//! every reader goes through it. The rules, applied at the envelope timestamp
+//! of the event being folded (so replay is deterministic):
+//!
+//! - A `claim`/`reclaim` is honoured only when the task is open and unclaimed,
+//!   or the claim is already held by the same sender. A live claim cannot be
+//!   taken over; a lapsed lease returns the task to the pool and then anyone
+//!   may take it.
+//! - A `done` or `abandon` is honoured only from the identity holding the live
+//!   claim, or from the task's creator while nobody holds it.
+//! - A `reopen` is honoured from the creator or from the identity that last
+//!   held the task.
+//!
+//! An ignored event is a normal signed message that stays on the board: the
+//! post succeeds, the state does not change. That is a client-side property,
+//! not a daemon guarantee, and it is stated as such in `README.md`.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -192,6 +213,23 @@ pub fn collect_tasks_from_messages(
     collect_tasks_from_messages_at(messages, channel, idboard_core::now_ms())
 }
 
+/// The identity holding a live claim at `at_ms`.
+///
+/// `None` means the task is unclaimed *or* the lease had already lapsed at that
+/// moment. Ownership is evaluated against the envelope timestamp of the event
+/// being folded, not against wall-clock now, so the same history always folds to
+/// the same state.
+fn live_claimer<'a>(view: &'a TaskView, at_ms: i64) -> Option<&'a str> {
+    if view.done {
+        return None;
+    }
+    let claimer = view.claimed_by.as_deref()?;
+    match view.lease_expires_at_ms {
+        Some(expires) if at_ms >= expires => None,
+        _ => Some(claimer),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn collect_tasks_from_messages_at(
     messages: Vec<idboard_core::wire::StoredMessage>,
@@ -202,6 +240,8 @@ pub fn collect_tasks_from_messages_at(
     let mut tasks: BTreeMap<String, (TaskView, i64, i64, Option<i64>)> = BTreeMap::new();
     for message in messages {
         let Some(ev) = parse_task_event(&message.envelope.body) else { continue };
+        let sender = message.envelope.sender_id.as_str();
+        let at = message.envelope.timestamp;
         match ev.kind.as_str() {
             "create" => {
                 let view = TaskView {
@@ -220,7 +260,15 @@ pub fn collect_tasks_from_messages_at(
             }
             "claim" | "reclaim" => {
                 if let Some((task, _, _, claimed_at)) = tasks.get_mut(&ev.id) {
-                    task.claimed_by = Some(message.envelope.sender_id);
+                    // Finished work is not claimable, and a live claim belongs to
+                    // its holder: only that identity may refresh it.
+                    if task.done {
+                        continue;
+                    }
+                    if live_claimer(task, at).is_some_and(|holder| holder != sender) {
+                        continue;
+                    }
+                    task.claimed_by = Some(message.envelope.sender_id.clone());
                     // Staleness uses the authoritative envelope timestamp, not the
                     // claimer's self-reported `claimed_at_ms` (used for leases).
                     *claimed_at = Some(message.envelope.timestamp);
@@ -240,6 +288,10 @@ pub fn collect_tasks_from_messages_at(
             }
             "abandon" => {
                 if let Some((task, _, _, claimed_at)) = tasks.get_mut(&ev.id) {
+                    let holder = live_claimer(task, at);
+                    if !owns_or_created(task, holder, sender) {
+                        continue;
+                    }
                     task.claimed_by = None;
                     task.lease_ms = None;
                     task.lease_expires_at_ms = None;
@@ -248,6 +300,11 @@ pub fn collect_tasks_from_messages_at(
             }
             "reopen" => {
                 if let Some((task, _, _, claimed_at)) = tasks.get_mut(&ev.id) {
+                    // The creator can unstick anything; the last holder can undo
+                    // its own completion. Nobody else can reopen work.
+                    if task.created_by != sender && task.claimed_by.as_deref() != Some(sender) {
+                        continue;
+                    }
                     task.done = false;
                     task.claimed_by = None;
                     task.lease_ms = None;
@@ -268,6 +325,10 @@ pub fn collect_tasks_from_messages_at(
             }
             "done" => {
                 if let Some((task, _, _, _)) = tasks.get_mut(&ev.id) {
+                    let holder = live_claimer(task, at);
+                    if !owns_or_created(task, holder, sender) {
+                        continue;
+                    }
                     task.done = true;
                     task.result = ev.result;
                     task.note = ev.note;
@@ -312,6 +373,15 @@ pub fn task_is_blocked(record: &TaskRecord, done_by_id: &HashMap<String, bool>) 
             .depends_on
             .iter()
             .any(|dep| !done_by_id.get(dep).copied().unwrap_or(false))
+}
+
+/// Whether `sender` may change a task's state: it holds the live claim, or it
+/// created the task and nobody else holds it.
+fn owns_or_created(task: &TaskView, holder: Option<&str>, sender: &str) -> bool {
+    match holder {
+        Some(holder) => holder == sender,
+        None => task.created_by == sender,
+    }
 }
 
 /// The ready subset of already-loaded records: open and unblocked, oldest
@@ -460,5 +530,121 @@ mod tests {
         let json = task_json(&records[0]);
         assert_eq!(json["result"], "blocked");
         assert_eq!(json["note"], "waiting on deploy");
+    }
+
+    /// One task, one owner: the claim is eng-01's, and only eng-01 can finish or
+    /// release it. A `done` from eng-02 is a signed message that changes nothing.
+    #[test]
+    fn a_done_from_a_non_claimant_is_ignored() {
+        let messages = vec![
+            envelope(r#"task:{"v":1,"id":"t-o","kind":"create","title":"owned"}"#, 1, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-o","kind":"claim"}"#, 2, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-o","kind":"done","result":"ok"}"#, 3, "eng-02"),
+        ];
+        let records = collect_tasks_from_messages_at(messages, "general", 1_000_000);
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].view.done, "a non-claimant's done must be ignored");
+        assert_eq!(records[0].view.claimed_by.as_deref(), Some("eng-01"));
+        assert_eq!(records[0].view.result, None);
+    }
+
+    /// The claimer's own `done`, and a creator's `done` on unclaimed work, are
+    /// both honoured: the guard must not break the normal path.
+    #[test]
+    fn the_claimer_and_the_creator_can_complete() {
+        let claimed = vec![
+            envelope(r#"task:{"v":1,"id":"t-c","kind":"create","title":"claimed"}"#, 1, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-c","kind":"claim"}"#, 2, "eng-02"),
+            envelope(r#"task:{"v":1,"id":"t-c","kind":"done","result":"ok"}"#, 3, "eng-02"),
+        ];
+        let records = collect_tasks_from_messages_at(claimed, "general", 1_000_000);
+        assert!(records[0].view.done, "the claimer may complete its own task");
+
+        let unclaimed = vec![
+            envelope(r#"task:{"v":1,"id":"t-u","kind":"create","title":"unclaimed"}"#, 1, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-u","kind":"done","result":"ok"}"#, 2, "eng-01"),
+        ];
+        let records = collect_tasks_from_messages_at(unclaimed, "general", 1_000_000);
+        assert!(records[0].view.done, "the creator may complete unclaimed work");
+    }
+
+    /// `abandon` from a stranger leaves the live claim alone; the holder's own
+    /// abandon releases it.
+    #[test]
+    fn abandon_only_works_for_the_holder() {
+        let stranger = vec![
+            envelope(r#"task:{"v":1,"id":"t-a","kind":"create","title":"held"}"#, 1, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-a","kind":"claim"}"#, 2, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-a","kind":"abandon"}"#, 3, "eng-02"),
+        ];
+        let records = collect_tasks_from_messages_at(stranger, "general", 1_000_000);
+        assert_eq!(records[0].view.claimed_by.as_deref(), Some("eng-01"), "a stranger cannot release a claim");
+
+        let holder = vec![
+            envelope(r#"task:{"v":1,"id":"t-a","kind":"create","title":"held"}"#, 1, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-a","kind":"claim"}"#, 2, "eng-01"),
+            envelope(r#"task:{"v":1,"id":"t-a","kind":"abandon"}"#, 3, "eng-01"),
+        ];
+        let records = collect_tasks_from_messages_at(holder, "general", 1_000_000);
+        assert_eq!(records[0].view.claimed_by, None, "the holder can release its own claim");
+    }
+
+    /// Reclaim is a takeover only after the lease lapses. Envelope timestamps
+    /// decide it, so the test needs no clock.
+    #[test]
+    fn reclaim_is_refused_while_live_and_allowed_after_the_lease_lapses() {
+        let live = vec![
+            envelope(r#"task:{"v":1,"id":"t-l","kind":"create","title":"live"}"#, 1, "eng-01"),
+            envelope(
+                r#"task:{"v":1,"id":"t-l","kind":"claim","lease_ms":100000,"claimed_at_ms":1000}"#,
+                2,
+                "eng-01",
+            ),
+            envelope(r#"task:{"v":1,"id":"t-l","kind":"reclaim"}"#, 3, "eng-02"),
+        ];
+        let records = collect_tasks_from_messages_at(live, "general", 5_000);
+        assert_eq!(records[0].view.claimed_by.as_deref(), Some("eng-01"), "a live claim cannot be taken over");
+
+        let lapsed = vec![
+            envelope(r#"task:{"v":1,"id":"t-l","kind":"create","title":"lapsed"}"#, 1, "eng-01"),
+            envelope(
+                r#"task:{"v":1,"id":"t-l","kind":"claim","lease_ms":1000,"claimed_at_ms":1000}"#,
+                2,
+                "eng-01",
+            ),
+            envelope(r#"task:{"v":1,"id":"t-l","kind":"reclaim"}"#, 3, "eng-02"),
+        ];
+        let records = collect_tasks_from_messages_at(lapsed, "general", 1_000_000);
+        assert_eq!(
+            records[0].view.claimed_by.as_deref(),
+            Some("eng-02"),
+            "a lapsed lease returns the task to the pool"
+        );
+    }
+
+    /// Reopen is the creator's or the last holder's call, not any reader's.
+    #[test]
+    fn reopen_is_the_creators_or_the_last_holders_call() {
+        let base = [
+            r#"task:{"v":1,"id":"t-r","kind":"create","title":"r"}"#,
+            r#"task:{"v":1,"id":"t-r","kind":"claim"}"#,
+            r#"task:{"v":1,"id":"t-r","kind":"done","result":"failed"}"#,
+        ];
+        let mut stranger = Vec::new();
+        for (i, body) in base.iter().enumerate() {
+            stranger.push(envelope(body, i as i64 + 1, "eng-01"));
+        }
+        stranger.push(envelope(r#"task:{"v":1,"id":"t-r","kind":"reopen"}"#, 4, "eng-02"));
+        let records = collect_tasks_from_messages_at(stranger, "general", 1_000_000);
+        assert!(records[0].view.done, "a stranger cannot reopen work");
+
+        let mut creator = Vec::new();
+        for (i, body) in base.iter().enumerate() {
+            creator.push(envelope(body, i as i64 + 1, "eng-01"));
+        }
+        creator.push(envelope(r#"task:{"v":1,"id":"t-r","kind":"reopen"}"#, 4, "eng-01"));
+        let records = collect_tasks_from_messages_at(creator, "general", 1_000_000);
+        assert!(!records[0].view.done, "the creator can reopen");
+        assert_eq!(records[0].view.result, None, "reopen clears the outcome");
     }
 }

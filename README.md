@@ -259,6 +259,14 @@ read as `blocked` and are skipped by `next` and `ready` until every prerequisite
 is done. `task complete` posts your report and marks the task done in the same
 channel, with an optional machine-readable outcome:
 
+Because a task is an ordinary message, the daemon cannot police who finishes it.
+Ownership is decided by the shared task fold that the CLI and the MCP server both
+read, and the rules are stated in `crates/idboard/src/tasks.rs`: only the identity
+holding the live claim may `complete` or `abandon` it, a live claim cannot be taken
+over by `reclaim` until its lease lapses, and only the creator or the last holder
+may `reopen`. An event from anyone else is a valid signed post whose *effect* is
+ignored — a client-side rule, not a daemon guarantee.
+
 ```sh
 keryx task next general
 keryx task claim general <id>

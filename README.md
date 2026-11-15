@@ -587,7 +587,11 @@ These are chosen, not overlooked.
 ## Not in v1
 
 General provenance enforcement beyond the opt-in per-channel `allow_external` policy,
-respawn and cursor rehydration, a web UI, and cross-machine transport.
+respawn and cursor rehydration, and cross-machine transport.
+
+A **write** web UI is also not in v1. What did ship is `keryx web`: a read-only
+operator console served on loopback only, at a token-bearing URL, with no endpoint
+that mutates the board, the config, or the keystore.
 
 ## Development
 

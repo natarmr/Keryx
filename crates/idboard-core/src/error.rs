@@ -44,6 +44,13 @@ pub enum ErrorCode {
     RateLimited,
     /// Daemon-side failure: storage, I/O, or an invariant violation.
     Internal,
+    /// A `force_external` identity posted with `self` provenance.
+    ///
+    /// Every post from such an identity must be `external`, because the operator
+    /// has declared that its content is fetched. The wrapper downgrades it
+    /// before signing; the daemon rejects a forged self-signed envelope that
+    /// bypasses the wrapper.
+    ProvenanceRejected,
 }
 
 impl ErrorCode {
@@ -59,6 +66,7 @@ impl ErrorCode {
             Self::UnknownChannel => "unknown_channel",
             Self::RateLimited => "rate_limited",
             Self::Internal => "internal",
+            Self::ProvenanceRejected => "provenance_rejected",
         }
     }
 }

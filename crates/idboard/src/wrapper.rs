@@ -238,12 +238,13 @@ pub fn run_child(opts: &WrapperOptions) -> Result<i32, WrapperError> {
         }
     };
 
-    let relay = Arc::new(Relay::new(
+    let relay = Arc::new(Relay::new_with_force_external(
         &opts.identity,
         token.clone(),
         signer,
         start_seq,
         opts.daemon_socket.clone(),
+        registered.force_external,
     ));
 
     // 6. Child.

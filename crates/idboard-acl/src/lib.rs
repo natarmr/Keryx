@@ -92,6 +92,14 @@ pub struct IdentityConfig {
     /// Free-form note for operators. Never interpreted.
     #[serde(default)]
     pub description: Option<String>,
+    /// When true, every post from this identity must be `external`.
+    ///
+    /// The wrapper downgrades `self` to `external` before signing, so the
+    /// signature covers the real value. The daemon rejects a forged `self` that
+    /// bypasses the wrapper. This lets an operator constrain a fetcher identity
+    /// whose content is fetched by definition.
+    #[serde(default)]
+    pub force_external: bool,
 }
 
 /// One `[channel.NAME]` table.
@@ -125,6 +133,7 @@ pub struct Identity {
     pub pubkey_hex: String,
     pub fingerprint: String,
     pub description: Option<String>,
+    pub force_external: bool,
 }
 
 impl Identity {
@@ -266,6 +275,7 @@ impl Config {
                     public_key,
                     pubkey_hex,
                     description: ic.description.clone(),
+                    force_external: ic.force_external,
                 },
             );
         }
@@ -296,6 +306,26 @@ impl Config {
                 read: cc.read.clone(),
                 allow_external: cc.allow_external,
             });
+        }
+
+        // `force_external = true` on an identity that can only post to
+        // `allow_external = false` channels is unsatisfiable: every post it makes
+        // must be external, but no channel it can reach will accept one.
+        for (name, id) in &identities {
+            if !id.force_external {
+                continue;
+            }
+            let postable: Vec<&Channel> = channels.values().filter(|c| c.can_post(id)).collect();
+            if postable.is_empty() {
+                continue;
+            }
+            if postable.iter().all(|c| !c.allow_external) {
+                problems.push(format!(
+                    "[identity.{name}]: force_external = true but every postable channel forbids external posts ({}). \
+                     This identity cannot post at all.",
+                    postable.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+                ));
+            }
         }
 
         if identities.is_empty() {
@@ -423,8 +453,12 @@ impl Config {
                 .map(|c| c.name.as_str())
                 .collect();
             out.push_str(&format!(
-                "  {:<16} role={:<12} fp={}  pubkey={}\n",
-                id.name, id.role, id.fingerprint, id.pubkey_hex
+                "  {:<16} role={:<12} fp={}  pubkey={}{}\n",
+                id.name,
+                id.role,
+                id.fingerprint,
+                id.pubkey_hex,
+                if id.force_external { "  force_external=true" } else { "" }
             ));
             out.push_str(&format!("      post -> {}\n", if postable.is_empty() { "(none)".into() } else { postable.join(", ") }));
             out.push_str(&format!("      read -> {}\n", if readable.is_empty() { "(none)".into() } else { readable.join(", ") }));
@@ -948,6 +982,40 @@ read = []
             !eng1.iter().any(|l| l.trim_start().starts_with("post ->") && l.contains("deploy-approvals")),
             "eng-01 must not be able to post to deploy-approvals:\n{s}"
         );
+    }
+
+    #[test]
+    fn force_external_is_admitted_and_unsatisfiable_configs_are_rejected() {
+        let ok = format!(
+            r#"
+[identity.fetcher]
+pubkey = "{k}"
+force_external = true
+[channel.general]
+post = ["*"]
+read = ["*"]
+"#,
+            k = key_for("x")
+        );
+        let c = cfg_with(&ok).unwrap();
+        assert!(c.identity("fetcher").unwrap().force_external);
+        assert!(c.summary().contains("force_external=true"), "{}", c.summary());
+
+        let bad = format!(
+            r#"
+[identity.fetcher]
+pubkey = "{k}"
+force_external = true
+[channel.strict]
+post = ["fetcher"]
+read = ["*"]
+allow_external = false
+"#,
+            k = key_for("x")
+        );
+        let err = cfg_with(&bad).unwrap_err().to_string();
+        assert!(err.contains("force_external"), "{err}");
+        assert!(err.contains("strict"), "{err}");
     }
 
     #[test]

@@ -2072,6 +2072,81 @@ fn allow_external_only_checks_the_declared_provenance() {
 }
 
 #[test]
+fn force_external_honest_wrapper_downgrades_self_to_external() {
+    // fetcher is declared as force_external = true: every post it makes is
+    // external, no matter what the child asked for. The wrapper must downgrade
+    // before signing, so the signature covers the real value and the daemon
+    // never rewrites a signed field.
+    let mut b = TestBoard::start();
+    let fetcher_keys = b.generate_keys(&["fetcher"]);
+    let cfg = std::fs::read_to_string(&b.config).unwrap();
+    std::fs::write(
+        &b.config,
+        format!(
+            "{cfg}\n[identity.fetcher]\nrole = \"fetcher\"\npubkey = \"{}\"\nforce_external = true\n",
+            fetcher_keys["fetcher"]
+        ),
+    )
+    .unwrap();
+    b.restart_daemon();
+
+    // Through the wrapper, `--provenance self` is silently downgraded to external.
+    let out = b.as_identity("fetcher", &["post", "general", "fetched content", "--provenance", "self"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // Stored provenance equals signed provenance: the board records external.
+    let read = b.as_identity("eng-01", &["read", "general", "--since", "0", "--json"]);
+    assert!(read.status.success(), "{}", String::from_utf8_lossy(&read.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&read.stdout).unwrap();
+    let msg = v["messages"].as_array().unwrap().iter().find(|m| m["body"] == "fetched content").expect("message stored");
+    assert_eq!(msg["provenance"], "external", "wrapper must have downgraded before signing: {v}");
+
+    // Text output marks it as fetched content.
+    let text = b.as_identity("eng-01", &["read", "general", "--since", "0"]);
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains("[external]"), "external provenance must be visible: {stdout}");
+}
+
+#[test]
+fn force_external_forged_self_is_rejected_with_provenance_rejected() {
+    let mut b = TestBoard::start();
+    let fetcher_keys = b.generate_keys(&["fetcher"]);
+    let cfg = std::fs::read_to_string(&b.config).unwrap();
+    std::fs::write(
+        &b.config,
+        format!(
+            "{cfg}\n[identity.fetcher]\nrole = \"fetcher\"\npubkey = \"{}\"\nforce_external = true\n",
+            fetcher_keys["fetcher"]
+        ),
+    )
+    .unwrap();
+    b.restart_daemon();
+
+    // Bypass the wrapper: sign a self envelope directly.
+    // Load the real key from the keystore file so the signature verifies.
+    // `TestBoard::generate_keys` already wrote it; load it back.
+    let seed = std::fs::read(b.home.path().join("keys").join("fetcher.key")).unwrap();
+    let fetcher_signer = idboard_core::keys::LocalSigner::from_seed(&seed.try_into().unwrap(), "fetcher").unwrap();
+    let env = fetcher_signer.sign_post("general", "forged self", Provenance::SelfOriginated, 1, idboard_core::now_ms()).unwrap();
+    let req = DaemonRequest { v: PROTOCOL_VERSION, envelope: env, since: 0, limit: 0 };
+    let res = b.daemon_raw(&req).expect("daemon round trip");
+    assert!(!res.ok, "forged self from a force_external identity must be rejected: {res:?}");
+    assert_eq!(res.error, Some(ErrorCode::ProvenanceRejected), "{res:?}");
+    assert!(b.senders("general").is_empty(), "rejected post must not be stored");
+
+    // The same seq with correct provenance is accepted, proving the rejection did
+    // not advance the counter or charge the budget.
+    let env = fetcher_signer.sign_post("general", "honest external", Provenance::External, 1, idboard_core::now_ms()).unwrap();
+    let req = DaemonRequest { v: PROTOCOL_VERSION, envelope: env, since: 0, limit: 0 };
+    let res = b.daemon_raw(&req).unwrap();
+    assert!(res.ok, "external with the same seq must be accepted after the rejection: {res:?}");
+    let read = b.as_identity("eng-01", &["read", "general", "--since", "0", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&read.stdout).unwrap();
+    let msg = v["messages"].as_array().unwrap().iter().find(|m| m["body"] == "honest external").expect("stored");
+    assert_eq!(msg["provenance"], "external", "stored must equal signed: {v}");
+}
+
+#[test]
 fn an_external_task_event_is_data_not_a_state_change() {
     let b = TestBoard::start();
 

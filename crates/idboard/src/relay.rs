@@ -74,6 +74,10 @@ pub struct Relay {
     /// unrelated posts.
     seq: Mutex<SeqCounter>,
     daemon_socket: PathBuf,
+    /// When true, every post is `external` regardless of what the child asked for.
+    /// The downgrade happens *before* signing, so the signature covers the real
+    /// value and the daemon never rewrites a signed field.
+    force_external: bool,
     /// How many messages this relay has signed. For diagnostics.
     signed: Mutex<u64>,
 }
@@ -86,12 +90,24 @@ impl Relay {
         start_seq: i64,
         daemon_socket: PathBuf,
     ) -> Self {
+        Self::new_with_force_external(identity, token, signer, start_seq, daemon_socket, false)
+    }
+
+    pub fn new_with_force_external(
+        identity: &str,
+        token: String,
+        signer: LocalSigner,
+        start_seq: i64,
+        daemon_socket: PathBuf,
+        force_external: bool,
+    ) -> Self {
         Self {
             identity: identity.to_string(),
             token,
             signer,
             seq: Mutex::new(SeqCounter::after(start_seq)),
             daemon_socket,
+            force_external,
             signed: Mutex::new(0),
         }
     }
@@ -141,9 +157,16 @@ impl Relay {
     ///
     /// Note the order: the sequence number is allocated *before* signing, under
     /// the lock, so two concurrent posts cannot be handed the same number.
+    /// `force_external` is applied before signing, so the signature covers the
+    /// value that is actually stored and the daemon never rewrites a signed field.
     fn post(&self, channel: &str, body: &str, provenance: idboard_core::Provenance) -> Result<DaemonResponse> {
         validate_channel(channel)?;
         validate_body(body)?;
+        let provenance = if self.force_external {
+            idboard_core::Provenance::External
+        } else {
+            provenance
+        };
 
         let seq = self
             .seq
@@ -352,6 +375,19 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"ab"));
         assert!(!constant_time_eq(b"", b"a"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn force_external_downgrades_self_before_signing() {
+        let signer = LocalSigner::generate("fetcher").unwrap().0;
+        let token = generate_token().unwrap();
+        let r = Relay::new_with_force_external("fetcher", token.clone(), signer, 0, PathBuf::from("unused"), true);
+        // Self is downgraded to external before the daemon ever sees it.
+        // We cannot inspect the envelope without a daemon, but we can prove the
+        // relay does not reject the request at the BadRequest/Provenance stage:
+        // it fails at the forward (Internal) because it is external and allowed.
+        let res = r.handle(&post_req(&token, "general", "fetched content"));
+        assert_eq!(res.error, Some(ErrorCode::Internal), "must pass validation and fail only at forward: {res:?}");
     }
 
     #[test]

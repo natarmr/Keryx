@@ -1851,6 +1851,7 @@ fn admin_report_value(
                 "role": id.role,
                 "fingerprint": id.fingerprint,
                 "pubkey": id.pubkey_hex,
+                "force_external": id.force_external,
                 "key_present": status.and_then(|s| s["key_present"].as_bool()).unwrap_or(false),
                 "key_matches_config": status.and_then(|s| s["key_matches_config"].as_bool()).unwrap_or(false),
             })
@@ -1903,8 +1904,13 @@ fn cmd_admin_report(json: bool) -> Result<i32> {
                 (Some(true), _) => "key=MISMATCH",
                 _ => "key=missing",
             };
+            let force = if id["force_external"].as_bool().unwrap_or(false) {
+                " force_external=true"
+            } else {
+                ""
+            };
             println!(
-                "  {:<16} role={:<12} fp={} {key}",
+                "  {:<16} role={:<12} fp={} {key}{force}",
                 id["identity"].as_str().unwrap_or("?"),
                 id["role"].as_str().unwrap_or("?"),
                 id["fingerprint"].as_str().unwrap_or("?")

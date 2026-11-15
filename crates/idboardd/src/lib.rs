@@ -211,6 +211,20 @@ fn handle_post(
 ) -> Result<DaemonResponse, CoreError> {
     authorize(config, identity, &env.channel, Op::Post)?;
 
+    // `force_external` identities must not post `self`: their content is fetched
+    // by definition. The wrapper downgrades before signing, so a self here is a
+    // forged envelope that bypassed the wrapper. Rejected after authorize and
+    // before the budget, so it is never stored and never charged.
+    if identity.force_external && env.provenance == Provenance::SelfOriginated {
+        return Err(CoreError::new(
+            ErrorCode::ProvenanceRejected,
+            format!(
+                "identity {:?} has force_external = true and may only post with provenance \"external\".",
+                identity.name
+            ),
+        ));
+    }
+
     // Channel policy, applied after reachability authorisation: a channel may
     // forbid external-provenance messages even when the caller may post.
     if env.provenance == Provenance::External {
@@ -1435,6 +1449,60 @@ allow_external = false
         }
         let res = f.board.handle(&post_req(&f.eng, "general", "yes", 1));
         assert!(res.ok, "refusals must not have consumed the one allowed post: {res:?}");
+    }
+
+    /// `force_external` identities may only post `external`. A forged `self` is
+    /// rejected after authorize and before budget/append, so it is never stored
+    /// and never charged. `external` from the same identity is still accepted,
+    /// and `self` from an ordinary identity is unchanged.
+    #[test]
+    fn force_external_identities_may_only_post_external() {
+        let (fetcher, fetcher_key) = keygen("fetcher");
+        let (eng, eng_key) = keygen("eng-01");
+        let (lead, lead_key) = keygen("lead");
+        let config = Config::from_toml(&format!(
+            r#"
+[identity.fetcher]
+pubkey = "{fetcher_key}"
+force_external = true
+[identity.eng-01]
+pubkey = "{eng_key}"
+[identity.lead]
+pubkey = "{lead_key}"
+[channel.general]
+post = ["*"]
+read = ["*"]
+[channel.strict]
+post = ["*"]
+read = ["*"]
+allow_external = false
+"#
+        ))
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let (board, _) = Board::new(config, store).unwrap();
+        let mut f = Fixture { board: board.with_fixed_clock(T0), eng: fetcher.clone(), lead, stranger: eng.clone() };
+
+        // Forged `self` from a force_external identity is rejected with the new code,
+        // and is not charged: the same seq is accepted next if corrected.
+        let forged = fetcher.sign_post("general", "fetched", Provenance::SelfOriginated, 1, T0).unwrap();
+        let res = f.board.handle(&request(forged));
+        assert_eq!(res.error, Some(ErrorCode::ProvenanceRejected), "{res:?}");
+        let external = fetcher.sign_post("general", "fetched", Provenance::External, 1, T0).unwrap();
+        let res = f.board.handle(&request(external));
+        assert!(res.ok, "external from a force_external identity must be accepted: {res:?}");
+        assert_eq!(res.messages[0].envelope.provenance, Provenance::External);
+        assert_eq!(f.board.store().last_seq("fetcher").unwrap(), 1, "the rejected seq must not have advanced the counter");
+
+        // Ordinary identity posting `self` is unaffected.
+        let self_ok = eng.sign_post("general", "my own", Provenance::SelfOriginated, 1, T0).unwrap();
+        let res = f.board.handle(&request(self_ok));
+        assert!(res.ok, "self from an ordinary identity must still be accepted: {res:?}");
+
+        // Stored provenance equals signed provenance: the daemon never rewrites.
+        let stored = f.board.store().read("general", 0, 10).unwrap();
+        let m = stored.iter().find(|m| m.envelope.body == "fetched").unwrap();
+        assert_eq!(m.envelope.provenance, Provenance::External, "stored must equal signed");
     }
 }
 

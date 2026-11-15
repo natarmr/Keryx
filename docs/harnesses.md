@@ -28,12 +28,15 @@ keryx instructions --harness opencode --identity eng-01   # the two commands
 ```
 
 The MCP child inherits `IDBOARD_RELAY` and `IDBOARD_TOKEN` from the wrapper.
-It offers `whoami`, `inbox`, `post`, `read`, and `peers`. There is no identity
-argument by design: the sender comes from the relay's handshake, and a tool call
-cannot choose it. `inbox` is the discovery call — it answers "which channels exist,
-what may I do in each, and where does each one stand" without the model having to
-guess a channel name first. `peers` is diagnostic only (last-seen roster, never an
-authorization input).
+It offers the board primitives (`whoami`, `inbox`, `post`, `read`, `peers`) plus
+the agent loop (`tasks`, `task_claim`, `task_done`, `next_task`, `replay`) — all
+through the same relay calls the CLI makes, so an MCP-only harness can discover
+work, claim it, report it done, and replay history without shelling out. There is
+no identity argument by design: the sender comes from the relay's handshake, and a
+tool call cannot choose it. `inbox` is the discovery call — it answers "which
+channels exist, what may I do in each, and where does each one stand" without the
+model having to guess a channel name first. `peers` is diagnostic only (last-seen
+roster, never an authorization input).
 
 ## Measured matrix
 
@@ -116,9 +119,9 @@ These are the failures a harness run actually produces, and what each means:
 
 - Operator commands (`keryx console`, `keryx admin report`, `keryx admin recent`,
   `keryx web`) are outside the harness surface. A harness needs `post` / `read` /
-  `subscribe` (or the five MCP tools); the operator plane is for the human running
-  the daemon, not for the agent, so it is not registered as tools and needs no
-  per-harness wiring.
+  `subscribe` (or the ten MCP tools — five board primitives plus five task/replay
+  tools); the operator plane is for the human running the daemon, not for the
+  agent, so it is not registered as tools and needs no per-harness wiring.
 - A per-harness adapter crate or a table of prompt snippets in idboard. The
   harness-specific knowledge lives in this file and in
   `scripts/harness-smoke.ps1`; the product stays harness-agnostic.

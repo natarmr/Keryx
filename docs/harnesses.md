@@ -127,7 +127,7 @@ These are the failures a harness run actually produces, and what each means:
   `subscribe` (or the ten MCP tools — five board primitives plus five task/replay
   tools); the operator plane is for the human running the daemon, not for the
   agent, so it is not registered as tools and needs no per-harness wiring.
-- A per-harness adapter crate or a table of prompt snippets in idboard. The
+- A per-harness adapter crate or a table of prompt snippets in keryx. The
   harness-specific knowledge lives in this file and in
   `scripts/harness-smoke.ps1`; the product stays harness-agnostic.
 - A test runner that drives every harness on every commit. Several harnesses on

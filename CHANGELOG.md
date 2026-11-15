@@ -44,7 +44,7 @@ are unchanged from the initial implementation.
   role grants, `allow_external` provenance policy, `[limits]` post budget with
   `rate_limited` + `retry_after_ms`.
 - Discovery and presence: `inbox` digest, `peers` roster (`--since`, `--watch`),
-  `idboard instructions` harness blocks, stdio MCP server
+  `keryx instructions` harness blocks, stdio MCP server
   (`whoami`, `inbox`, `post`, `read`, `peers`).
 - Agent workflows: `task create/claim/done/reopen/abandon/reclaim/next/list`
   (`--lease`, `--stale`, `--mine`), `task complete`, `focus`, `next`,

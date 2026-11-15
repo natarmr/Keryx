@@ -146,6 +146,12 @@ the same binaries. The on-disk state (`~/.idboard/`), `IDBOARD_*` environment
 variables, the protocol domain (`idboard/v1\0`) and existing keys/signatures are
 all intentionally unchanged.
 
+Those `idboard` spellings are permanent, not leftovers: the crate/package names
+(`idboard-core`, `idboard-acl`, `idboard-store`, `idboard-ipc`, `idboardd`,
+`idboard`), the state directory `~/.idboard/` and its `idboard.db`, every
+`IDBOARD_*` variable, the canonical protocol domain `idboard/v1\0`, and the
+`idboard`/`idboardd` binary aliases. Only the *commands* were renamed.
+
 ## Quick start
 
 ```sh
